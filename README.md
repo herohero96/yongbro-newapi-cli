@@ -39,8 +39,10 @@ ynapi balance      # 查余额
 | 命令 | 作用 |
 |---|---|
 | `ynapi setup` | 交互式写入 `~/.ynapi/config.json`（中转站 URL + API key） |
+| `ynapi setup --advanced` | 额外配置 cookie + user_id，解锁 `usage` 命令 |
 | `ynapi balance` | 查询当前 key 的余额与用量 |
 | `ynapi models [-q kw]` | 列出中转站可用的模型，`-q` 关键字过滤 |
+| `ynapi usage [--days N]` | 按天查看用量明细（默认 7 天，需要 cookie 鉴权） |
 | `ynapi --help` | 显示帮助 |
 
 ### 全局选项
@@ -58,8 +60,38 @@ ynapi balance      # 查余额
 |---|---|
 | `YNAPI_SITE` | 中转站 URL |
 | `YNAPI_KEY` | API key |
+| `YNAPI_COOKIE` | 浏览器 cookie（`usage` 命令用） |
+| `YNAPI_USER_ID` | `new-api-user` 头里的数字 ID（`usage` 命令用） |
 
 优先级：命令行 flag > 环境变量 > 配置文件。
+
+## 关于 `usage` 命令
+
+`balance` 和 `models` 用 API key 就够了，但**按天用量**这种数据 NewAPI 后台只对登陆 session 开放。所以 `usage` 需要你额外提供浏览器 cookie：
+
+```bash
+ynapi setup --advanced
+```
+
+按提示从浏览器 DevTools 抓一次 cookie 和 `new-api-user` 值粘进去就行。cookie 一般能用几天到几周，过期了重抓即可。
+
+```bash
+$ ynapi usage --days 7
+
+中转站   https://ai.ltcraft.cn
+用户     you@example.com (id=446)
+总额度   825.0579 美元等值（剩余）
+累计用   18474.5550 美元等值
+总请求   77829 次
+
+最近 7 天用量
+────────────────────────────────────────────────────────────────
+日期        请求数   tokens     金额($)   主力模型
+2026-05-23      67    4087827    5.5559   gpt-5.5
+2026-05-24     273     567772   51.2757   claude-opus-4-7
+────────────────────────────────────────────────────────────────
+合计           340    4655599   56.8316
+```
 
 ## 配合 Claude Code / Cursor / Codex 使用
 

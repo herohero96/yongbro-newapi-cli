@@ -41,3 +41,15 @@ export function resolveCreds({ siteFlag, keyFlag, config }) {
   const key = keyFlag || process.env.YNAPI_KEY || config?.api_key;
   return { site: site.replace(/\/+$/, ""), key };
 }
+
+export function resolveAuth({ siteFlag, config }) {
+  const site = (
+    siteFlag ||
+    process.env.YNAPI_SITE ||
+    config?.site ||
+    DEFAULT_SITE
+  ).replace(/\/+$/, "");
+  const cookie = process.env.YNAPI_COOKIE || config?.cookie;
+  const userId = process.env.YNAPI_USER_ID || config?.user_id;
+  return { site, cookie, userId };
+}

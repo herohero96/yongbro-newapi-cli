@@ -9,9 +9,15 @@ import {
   writeConfig,
   configPath,
   resolveCreds,
+  resolveAuth,
   DEFAULT_SITE,
 } from "./config.js";
-import { getTokenUsage, listModels } from "./api.js";
+import {
+  getTokenUsage,
+  listModels,
+  getUserSelf,
+  getUsageData,
+} from "./api.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json");
@@ -29,6 +35,7 @@ program
 program
   .command("setup")
   .description("交互式写入配置（中转站 URL + API key）")
+  .option("--advanced", "高级模式：额外配置 cookie + user_id（用于 usage 命令）")
   .action(runSetup);
 
 program
@@ -42,20 +49,31 @@ program
   .option("-q, --query <kw>", "按模型名筛选（区分大小写）")
   .action(runModels);
 
+program
+  .command("usage")
+  .description("按天查看用量明细（需要 cookie 鉴权，先跑 `ynapi setup --advanced`）")
+  .option("-d, --days <n>", "查询最近 N 天（默认 7）", "7")
+  .action(runUsage);
+
 program.addHelpText(
   "after",
   `
 示例:
   $ ynapi setup                                  # 首次配置
+  $ ynapi setup --advanced                       # 额外配置 cookie（解锁 usage）
   $ ynapi balance                                # 查余额
   $ ynapi balance --json | jq                    # 管道用
   $ ynapi models                                 # 列所有模型
   $ ynapi models -q claude                       # 只看含 claude 的
+  $ ynapi usage                                  # 最近 7 天用量
+  $ ynapi usage --days 30                        # 最近 30 天
   $ ynapi --site https://other.com --key sk-xxx balance
 
 环境变量:
-  YNAPI_SITE     中转站 URL（覆盖配置文件）
-  YNAPI_KEY      API key（覆盖配置文件）
+  YNAPI_SITE       中转站 URL（覆盖配置文件）
+  YNAPI_KEY        API key（覆盖配置文件）
+  YNAPI_COOKIE     浏览器 cookie（usage 命令用）
+  YNAPI_USER_ID    new-api-user 头（usage 命令用）
 
 配置文件:
   ${configPath()}
@@ -67,7 +85,7 @@ program.parseAsync(process.argv).catch((err) => {
   process.exit(1);
 });
 
-async function runSetup() {
+async function runSetup(cmdOpts) {
   const rl = createInterface({ input, output });
   const existing = (await readConfig()) ?? {};
   try {
@@ -78,12 +96,34 @@ async function runSetup() {
       `API key${existing.api_key ? "（回车保留现有）" : ""}: `
     );
     const next = {
+      ...existing,
       site: (siteAns.trim() || existing.site || DEFAULT_SITE).replace(/\/+$/, ""),
       api_key: keyAns.trim() || existing.api_key || "",
     };
     if (!next.api_key) {
       throw new Error("api_key 不能为空");
     }
+
+    if (cmdOpts.advanced) {
+      output.write("\n--- 高级配置（usage 命令需要）---\n");
+      output.write("打开中转站后台 → F12 → Network → 刷新页面 → 找任意 /api/ 请求\n");
+      output.write("在 Headers 里复制 Cookie 整段，以及 new-api-user 的值\n\n");
+      const cookieAns = await rl.question(
+        `Cookie${existing.cookie ? "（回车保留现有）" : ""}: `
+      );
+      const userIdAns = await rl.question(
+        `new-api-user (数字)${existing.user_id ? `（回车保留 ${existing.user_id}）` : ""}: `
+      );
+      next.cookie = cookieAns.trim() || existing.cookie || "";
+      const uid = userIdAns.trim() || (existing.user_id ? String(existing.user_id) : "");
+      if (uid && !/^\d+$/.test(uid)) {
+        throw new Error("user_id 必须是数字");
+      }
+      next.user_id = uid ? Number(uid) : undefined;
+      if (!next.cookie) throw new Error("cookie 不能为空");
+      if (!next.user_id) throw new Error("user_id 不能为空");
+    }
+
     await writeConfig(next);
     output.write(`✓ 已写入 ${configPath()}\n`);
   } finally {
@@ -175,4 +215,98 @@ async function runModels(cmdOpts) {
     const owner = m.owned_by ?? "";
     output.write(`${id}  ${owner}\n`);
   }
+}
+
+async function runUsage(cmdOpts) {
+  const opts = program.opts();
+  const cfg = await readConfig();
+  const { site, cookie, userId } = resolveAuth({
+    siteFlag: opts.site,
+    config: cfg,
+  });
+
+  const days = Number.parseInt(cmdOpts.days, 10);
+  if (!Number.isFinite(days) || days <= 0) {
+    throw new Error("--days 必须是正整数");
+  }
+
+  const endTs = Math.floor(Date.now() / 1000);
+  const startTs = endTs - days * 86400;
+
+  const [userJson, usageJson] = await Promise.all([
+    getUserSelf(site, { cookie, userId }),
+    getUsageData(site, { cookie, userId }, { startTs, endTs }),
+  ]);
+
+  const user = userJson?.data ?? {};
+  const buckets = Array.isArray(usageJson?.data) ? usageJson.data : [];
+
+  if (opts.json) {
+    output.write(
+      JSON.stringify({
+        range: { start: startTs, end: endTs, days },
+        user,
+        buckets,
+      }) + "\n"
+    );
+    return;
+  }
+
+  const fmt = (n) => {
+    if (typeof n !== "number") return String(n);
+    return (n / 500000).toFixed(4);
+  };
+
+  output.write(`中转站   ${site}\n`);
+  output.write(`用户     ${user.username ?? "(未知)"} (id=${user.id ?? "?"})\n`);
+  output.write(`总额度   ${fmt(user.quota)} 美元等值（剩余）\n`);
+  output.write(`累计用   ${fmt(user.used_quota)} 美元等值\n`);
+  output.write(`总请求   ${user.request_count ?? 0} 次\n`);
+  output.write(`\n最近 ${days} 天用量\n`);
+  output.write("─".repeat(64) + "\n");
+
+  if (buckets.length === 0) {
+    output.write("（无记录）\n");
+    return;
+  }
+
+  const byDay = new Map();
+  for (const b of buckets) {
+    const day = new Date(b.created_at * 1000).toISOString().slice(0, 10);
+    if (!byDay.has(day)) {
+      byDay.set(day, { quota: 0, count: 0, tokens: 0, models: new Map() });
+    }
+    const d = byDay.get(day);
+    d.quota += b.quota || 0;
+    d.count += b.count || 0;
+    d.tokens += b.token_used || 0;
+    const mname = b.model_name || "(unknown)";
+    d.models.set(mname, (d.models.get(mname) || 0) + (b.quota || 0));
+  }
+
+  const sortedDays = [...byDay.keys()].sort();
+  output.write("日期        请求数   tokens     金额($)   主力模型\n");
+  for (const day of sortedDays) {
+    const d = byDay.get(day);
+    const topModel = [...d.models.entries()].sort((a, b) => b[1] - a[1])[0];
+    const topName = topModel ? topModel[0] : "";
+    output.write(
+      `${day}  ${String(d.count).padStart(6)}  ${String(d.tokens).padStart(9)}  ${fmt(d.quota).padStart(8)}   ${topName}\n`
+    );
+  }
+
+  const total = sortedDays.reduce(
+    (acc, day) => {
+      const d = byDay.get(day);
+      acc.count += d.count;
+      acc.tokens += d.tokens;
+      acc.quota += d.quota;
+      return acc;
+    },
+    { count: 0, tokens: 0, quota: 0 }
+  );
+  output.write("─".repeat(64) + "\n");
+  output.write(
+    `合计        ${String(total.count).padStart(6)}  ${String(total.tokens).padStart(9)}  ${fmt(total.quota).padStart(8)}\n`
+  );
 }
