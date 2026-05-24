@@ -1,0 +1,44 @@
+{
+  "name": "@herohero96/newapi-cli",
+  "version": "0.1.0",
+  "description": "A tiny CLI to query NewAPI relay station balance, usage, and models from your terminal.",
+  "keywords": [
+    "newapi",
+    "new-api",
+    "cli",
+    "openai",
+    "claude",
+    "balance",
+    "quota",
+    "ai-relay"
+  ],
+  "homepage": "https://github.com/herohero96/yongbro-newapi-cli#readme",
+  "bugs": {
+    "url": "https://github.com/herohero96/yongbro-newapi-cli/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/herohero96/yongbro-newapi-cli.git"
+  },
+  "license": "MIT",
+  "author": "herohero96",
+  "type": "module",
+  "bin": {
+    "ynapi": "./src/index.js"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  }
+}
