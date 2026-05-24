@@ -21,6 +21,9 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Upgrade npm to latest (trusted publishing needs >= 11.5.1)
+        run: npm install -g npm@latest
+
       - name: Verify tag matches package.json version
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
@@ -38,7 +41,5 @@ jobs:
       - name: Sanity check (--help works)
         run: node src/index.js --help
 
-      - name: Publish
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish (via Trusted Publishing / OIDC)
+        run: npm publish --access public
