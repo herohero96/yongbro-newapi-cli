@@ -1,6 +1,6 @@
 {
   "name": "@herohero96/newapi-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A tiny CLI to query NewAPI relay station balance, usage, and models from your terminal.",
   "keywords": [
     "newapi",
@@ -24,7 +24,7 @@
   "author": "herohero96",
   "type": "module",
   "bin": {
-    "ynapi": "./src/index.js"
+    "ynapi": "src/index.js"
   },
   "files": [
     "src/",

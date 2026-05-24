@@ -40,6 +40,7 @@ ynapi balance      # 查余额
 |---|---|
 | `ynapi setup` | 交互式写入 `~/.ynapi/config.json`（中转站 URL + API key） |
 | `ynapi balance` | 查询当前 key 的余额与用量 |
+| `ynapi models [-q kw]` | 列出中转站可用的模型，`-q` 关键字过滤 |
 | `ynapi --help` | 显示帮助 |
 
 ### 全局选项
@@ -60,16 +61,17 @@ ynapi balance      # 查余额
 
 优先级：命令行 flag > 环境变量 > 配置文件。
 
-## 配合 Claude Code / Cursor 使用
+## 配合 Claude Code / Cursor / Codex 使用
 
-把下面这段提示词复制到 Claude Code 或 Cursor 的对话框：
+把下面这段提示词复制到 Claude Code、Cursor 或 Codex 的对话框：
 
 ```
-Run `npx @herohero96/newapi-cli --help` to discover the CLI, then use it
-to check my NewAPI relay balance and usage. Always reply in Chinese.
+Run `npx @herohero96/newapi-cli@latest --help` to discover the CLI, then use it
+to check my NewAPI relay balance, usage, and available models.
+Always reply in Chinese.
 ```
 
-之后就可以直接对 AI 说"看一下我的余额"——AI 会自己跑 CLI 查询。
+之后就可以直接对 AI 说"看一下我的余额"或"列一下能用的 claude 模型"——AI 会自己跑 CLI 查询。
 
 ## 配置文件
 

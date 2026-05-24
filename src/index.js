@@ -11,7 +11,7 @@ import {
   resolveCreds,
   DEFAULT_SITE,
 } from "./config.js";
-import { getTokenUsage } from "./api.js";
+import { getTokenUsage, listModels } from "./api.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json");
@@ -36,6 +36,12 @@ program
   .description("查询当前 key 的余额与用量")
   .action(runBalance);
 
+program
+  .command("models")
+  .description("列出中转站可用的模型")
+  .option("-q, --query <kw>", "按模型名筛选（区分大小写）")
+  .action(runModels);
+
 program.addHelpText(
   "after",
   `
@@ -43,6 +49,8 @@ program.addHelpText(
   $ ynapi setup                                  # 首次配置
   $ ynapi balance                                # 查余额
   $ ynapi balance --json | jq                    # 管道用
+  $ ynapi models                                 # 列所有模型
+  $ ynapi models -q claude                       # 只看含 claude 的
   $ ynapi --site https://other.com --key sk-xxx balance
 
 环境变量:
@@ -124,4 +132,47 @@ async function runBalance() {
     lines.push(`过期     永不过期`);
   }
   output.write(lines.join("\n") + "\n");
+}
+
+async function runModels(cmdOpts) {
+  const opts = program.opts();
+  const cfg = await readConfig();
+  const { site, key } = resolveCreds({
+    siteFlag: opts.site,
+    keyFlag: opts.key,
+    config: cfg,
+  });
+  if (!key) {
+    throw new Error("未配置 API key。先跑 `ynapi setup`，或用 --key / YNAPI_KEY 提供。");
+  }
+
+  const json = await listModels(site, key);
+  let models = Array.isArray(json?.data) ? json.data : [];
+
+  if (cmdOpts.query) {
+    const q = cmdOpts.query.toLowerCase();
+    models = models.filter((m) => (m.id ?? "").toLowerCase().includes(q));
+  }
+
+  if (opts.json) {
+    output.write(JSON.stringify({ count: models.length, data: models }) + "\n");
+    return;
+  }
+
+  if (models.length === 0) {
+    output.write("（无匹配模型）\n");
+    return;
+  }
+
+  const idWidth = Math.min(
+    50,
+    models.reduce((max, m) => Math.max(max, (m.id ?? "").length), 8)
+  );
+  output.write(`共 ${models.length} 个模型 @ ${site}\n`);
+  output.write("─".repeat(idWidth + 24) + "\n");
+  for (const m of models) {
+    const id = (m.id ?? "").padEnd(idWidth);
+    const owner = m.owned_by ?? "";
+    output.write(`${id}  ${owner}\n`);
+  }
 }
