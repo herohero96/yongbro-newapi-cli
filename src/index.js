@@ -18,10 +18,18 @@ import {
   getUserSelf,
   getUsageData,
   listTokens,
+  getSelfLogs,
+  ApiError,
 } from "./api.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json");
+
+const QUOTA_PER_DOLLAR = 500000;
+function fmtQuota(n) {
+  if (typeof n !== "number") return String(n);
+  return (n / QUOTA_PER_DOLLAR).toFixed(4);
+}
 
 const program = new Command();
 
@@ -55,6 +63,7 @@ program
   .command("usage")
   .description("按天查看用量明细（需要 cookie 鉴权，先跑 `ynapi setup --advanced`）")
   .option("-d, --days <n>", "查询最近 N 天（默认 7）", "7")
+  .option("-m, --by-model", "按模型分组（替代默认的按天分组）")
   .action(runUsage);
 
 program
@@ -62,6 +71,30 @@ program
   .description("列出账号下的所有令牌（需要 cookie 鉴权）")
   .option("-a, --all", "也显示已禁用 / 已过期 / 已耗尽的令牌")
   .action(runTokens);
+
+program
+  .command("logs")
+  .description("查看每次具体调用的流水明细（需要 cookie 鉴权）")
+  .option("-n, --limit <n>", "显示最近 N 条（默认 50）", "50")
+  .option("-d, --days <n>", "只看最近 N 天（默认 7）", "7")
+  .option("-m, --model <name>", "按模型名过滤（前缀匹配）")
+  .option("-t, --token <name>", "按 token 名过滤")
+  .action(runLogs);
+
+const configCmd = program
+  .command("config")
+  .description("查看或管理本地配置文件");
+
+configCmd
+  .command("show")
+  .description("打印当前生效的配置（API key / cookie 自动 mask）")
+  .action(runConfigShow);
+
+program
+  .command("status")
+  .alias("doctor")
+  .description("健康检查：配置、API key、cookie 是否都正常")
+  .action(runStatus);
 
 program.addHelpText(
   "after",
@@ -74,10 +107,18 @@ program.addHelpText(
   $ ynapi tokens --compact                       # 同 --json，与 job-pro 一致
   $ ynapi models                                 # 列所有模型
   $ ynapi models -q claude                       # 只看含 claude 的
-  $ ynapi usage                                  # 最近 7 天用量
+  $ ynapi usage                                  # 最近 7 天用量（按天）
   $ ynapi usage --days 30                        # 最近 30 天
+  $ ynapi usage --by-model                       # 按模型分组而不是按天
   $ ynapi tokens                                 # 列出所有令牌
   $ ynapi tokens -a                              # 包含禁用/过期/耗尽的
+  $ ynapi logs                                   # 最近 50 条调用流水
+  $ ynapi logs --limit 200 --days 1              # 今天的最近 200 条
+  $ ynapi logs --model claude                    # 只看 claude-* 调用
+  $ ynapi logs --token main --json | jq          # 按令牌过滤 + 管道
+  $ ynapi config show                            # 看当前生效的配置（自动 mask）
+  $ ynapi status                                 # 健康检查（配置/key/cookie）
+  $ ynapi doctor --json                          # 同上，机器可读输出
   $ ynapi --site https://other.com --key sk-xxx balance
 
 环境变量:
@@ -162,20 +203,15 @@ async function runBalance() {
     return;
   }
 
-  const fmt = (n) => {
-    if (typeof n !== "number") return String(n);
-    return (n / 500000).toFixed(4);
-  };
-
   const lines = [];
   lines.push(`中转站   ${site}`);
   lines.push(`Key 名   ${data.name ?? "(未命名)"}`);
   if (data.unlimited_quota) {
-    lines.push(`额度     ∞ 无限额度（已用 ${fmt(data.total_used)} 美元等值）`);
+    lines.push(`额度     ∞ 无限额度（已用 ${fmtQuota(data.total_used)} 美元等值）`);
   } else {
-    lines.push(`总额度   ${fmt(data.total_granted)} 美元等值`);
-    lines.push(`已用     ${fmt(data.total_used)} 美元等值`);
-    lines.push(`剩余     ${fmt(data.total_available)} 美元等值`);
+    lines.push(`总额度   ${fmtQuota(data.total_granted)} 美元等值`);
+    lines.push(`已用     ${fmtQuota(data.total_used)} 美元等值`);
+    lines.push(`剩余     ${fmtQuota(data.total_available)} 美元等值`);
   }
   if (data.expires_at && data.expires_at !== 0) {
     lines.push(`过期     ${new Date(data.expires_at * 1000).toLocaleString()}`);
@@ -183,9 +219,7 @@ async function runBalance() {
     lines.push(`过期     永不过期`);
   }
   output.write(lines.join("\n") + "\n");
-}
-
-async function runModels(cmdOpts) {
+}async function runModels(cmdOpts) {
   const opts = program.opts();
   const cfg = await readConfig();
   const { site, key } = resolveCreds({
@@ -263,23 +297,63 @@ async function runUsage(cmdOpts) {
     return;
   }
 
-  const fmt = (n) => {
-    if (typeof n !== "number") return String(n);
-    return (n / 500000).toFixed(4);
-  };
-
   output.write(`中转站   ${site}\n`);
   output.write(`用户     ${user.username ?? "(未知)"} (id=${user.id ?? "?"})\n`);
-  output.write(`总额度   ${fmt(user.quota)} 美元等值（剩余）\n`);
-  output.write(`累计用   ${fmt(user.used_quota)} 美元等值\n`);
+  output.write(`总额度   ${fmtQuota(user.quota)} 美元等值（剩余）\n`);
+  output.write(`累计用   ${fmtQuota(user.used_quota)} 美元等值\n`);
   output.write(`总请求   ${user.request_count ?? 0} 次\n`);
-  output.write(`\n最近 ${days} 天用量\n`);
-  output.write("─".repeat(64) + "\n");
 
   if (buckets.length === 0) {
+    output.write(`\n最近 ${days} 天用量\n`);
+    output.write("─".repeat(64) + "\n");
     output.write("（无记录）\n");
     return;
   }
+
+  if (cmdOpts.byModel) {
+    const byModel = new Map();
+    for (const b of buckets) {
+      const mname = b.model_name || "(unknown)";
+      if (!byModel.has(mname)) {
+        byModel.set(mname, { quota: 0, count: 0, tokens: 0 });
+      }
+      const m = byModel.get(mname);
+      m.quota += b.quota || 0;
+      m.count += b.count || 0;
+      m.tokens += b.token_used || 0;
+    }
+    const rows = [...byModel.entries()].sort((a, b) => b[1].quota - a[1].quota);
+    output.write(`\n最近 ${days} 天用量（按模型）\n`);
+    output.write("─".repeat(70) + "\n");
+    output.write(
+      padEndWide("模型", 36) +
+        "请求数   tokens     金额($)\n"
+    );
+    for (const [name, m] of rows) {
+      output.write(
+        padEndWide(name, 36) +
+          `${String(m.count).padStart(6)}  ${String(m.tokens).padStart(9)}  ${fmtQuota(m.quota).padStart(8)}\n`
+      );
+    }
+    const total = rows.reduce(
+      (acc, [, m]) => {
+        acc.count += m.count;
+        acc.tokens += m.tokens;
+        acc.quota += m.quota;
+        return acc;
+      },
+      { count: 0, tokens: 0, quota: 0 }
+    );
+    output.write("─".repeat(70) + "\n");
+    output.write(
+      padEndWide("合计", 36) +
+        `${String(total.count).padStart(6)}  ${String(total.tokens).padStart(9)}  ${fmtQuota(total.quota).padStart(8)}\n`
+    );
+    return;
+  }
+
+  output.write(`\n最近 ${days} 天用量\n`);
+  output.write("─".repeat(64) + "\n");
 
   const byDay = new Map();
   for (const b of buckets) {
@@ -302,7 +376,7 @@ async function runUsage(cmdOpts) {
     const topModel = [...d.models.entries()].sort((a, b) => b[1] - a[1])[0];
     const topName = topModel ? topModel[0] : "";
     output.write(
-      `${day}  ${String(d.count).padStart(6)}  ${String(d.tokens).padStart(9)}  ${fmt(d.quota).padStart(8)}   ${topName}\n`
+      `${day}  ${String(d.count).padStart(6)}  ${String(d.tokens).padStart(9)}  ${fmtQuota(d.quota).padStart(8)}   ${topName}\n`
     );
   }
 
@@ -318,7 +392,7 @@ async function runUsage(cmdOpts) {
   );
   output.write("─".repeat(64) + "\n");
   output.write(
-    `合计        ${String(total.count).padStart(6)}  ${String(total.tokens).padStart(9)}  ${fmt(total.quota).padStart(8)}\n`
+    `合计        ${String(total.count).padStart(6)}  ${String(total.tokens).padStart(9)}  ${fmtQuota(total.quota).padStart(8)}\n`
   );
 }
 
@@ -365,10 +439,6 @@ async function runTokens(cmdOpts) {
     return;
   }
 
-  const fmt = (n) => {
-    if (typeof n !== "number") return String(n);
-    return (n / 500000).toFixed(4);
-  };
   const fmtTime = (ts) => {
     if (!ts || ts <= 0) return "—";
     const d = new Date(ts * 1000);
@@ -398,10 +468,307 @@ async function runTokens(cmdOpts) {
     const name = padEndWide(t.name ?? "", 28);
     const status = padEndWide(TOKEN_STATUS[t.status] ?? `?(${t.status})`, 6);
     const group = padEndWide(t.group ?? "", 10);
-    const used = padEndWide(fmt(t.used_quota), 12);
-    const remain = padEndWide(t.unlimited_quota ? "∞" : fmt(t.remain_quota), 14);
+    const used = padEndWide(fmtQuota(t.used_quota), 12);
+    const remain = padEndWide(t.unlimited_quota ? "∞" : fmtQuota(t.remain_quota), 14);
     const expire = padEndWide(fmtExpire(t.expired_time), 14);
     const accessed = fmtTime(t.accessed_time);
     output.write(`${name}${status}${group}${used}${remain}${expire}${accessed}\n`);
   }
+}
+
+function maskKey(k) {
+  if (!k) return "";
+  if (k.length <= 12) return k.slice(0, 2) + "***" + k.slice(-2);
+  return k.slice(0, 6) + "***" + k.slice(-4);
+}
+
+async function runStatus() {
+  const opts = program.opts();
+  const cfg = await readConfig();
+  const { site, key } = resolveCreds({
+    siteFlag: opts.site,
+    keyFlag: opts.key,
+    config: cfg,
+  });
+  const { cookie, userId } = resolveAuth({ siteFlag: opts.site, config: cfg });
+  const asJson = opts.json || opts.compact;
+  const checks = [];
+
+  // 1. config
+  if (cfg) {
+    checks.push({
+      name: "config",
+      ok: true,
+      detail: configPath(),
+    });
+  } else {
+    checks.push({
+      name: "config",
+      ok: false,
+      detail: `未找到 ${configPath()}，跑 \`ynapi setup\` 初始化`,
+    });
+  }
+
+  // 2. api-key
+  if (!key) {
+    checks.push({
+      name: "api-key",
+      ok: false,
+      detail: "未配置 API key（设置 YNAPI_KEY 或跑 `ynapi setup`）",
+    });
+  } else {
+    const t0 = Date.now();
+    try {
+      const json = await getTokenUsage(site, key);
+      const data = json?.data ?? {};
+      const balance = data.unlimited_quota
+        ? "∞"
+        : (typeof data.total_available === "number"
+            ? fmtQuota(data.total_available)
+            : "?");
+      checks.push({
+        name: "api-key",
+        ok: true,
+        detail: `${maskKey(key)} — 余额 ${balance} (${Date.now() - t0}ms)`,
+        meta: { masked_key: maskKey(key), balance, latency_ms: Date.now() - t0 },
+      });
+    } catch (err) {
+      const status = err instanceof ApiError ? err.status : undefined;
+      checks.push({
+        name: "api-key",
+        ok: false,
+        detail: err.message,
+        meta: { status },
+      });
+    }
+  }
+
+  // 3. cookie
+  if (!cookie || !userId) {
+    const missing = [];
+    if (!cookie) missing.push("cookie");
+    if (!userId) missing.push("user_id");
+    checks.push({
+      name: "cookie",
+      ok: false,
+      detail: `未配置 ${missing.join(" + ")}（跑 \`ynapi setup --advanced\` 解锁 usage/tokens）`,
+    });
+  } else {
+    const t0 = Date.now();
+    try {
+      const json = await getUserSelf(site, { cookie, userId });
+      const user = json?.data ?? {};
+      checks.push({
+        name: "cookie",
+        ok: true,
+        detail: `${user.username ?? "?"} (id=${user.id ?? userId}) (${Date.now() - t0}ms)`,
+        meta: { username: user.username, user_id: user.id ?? userId, latency_ms: Date.now() - t0 },
+      });
+    } catch (err) {
+      const status = err instanceof ApiError ? err.status : undefined;
+      checks.push({
+        name: "cookie",
+        ok: false,
+        detail: err.message,
+        meta: { status },
+      });
+    }
+  }
+
+  const failed = checks.filter((c) => !c.ok);
+  const ok = failed.length === 0;
+
+  if (asJson) {
+    output.write(
+      JSON.stringify({
+        ok,
+        site,
+        checks,
+        summary: { total: checks.length, failed: failed.length },
+      }) + "\n"
+    );
+  } else {
+    output.write(`ynapi status @ ${site}\n\n`);
+    const labelWidth = 10;
+    for (const c of checks) {
+      const mark = c.ok ? "✓" : "✗";
+      output.write(`  ${mark}  ${c.name.padEnd(labelWidth)} ${c.detail}\n`);
+    }
+    output.write("\n");
+    output.write(ok ? "全部通过\n" : `${failed.length} 项失败\n`);
+  }
+
+  if (!ok) process.exitCode = 1;
+}
+
+function maskCookie(c) {
+  if (!c) return "";
+  const tail = c.length > 12 ? c.slice(-8) : "";
+  return `***${tail} (${c.length} 字符)`;
+}
+
+async function runConfigShow() {
+  const opts = program.opts();
+  const cfg = (await readConfig()) ?? {};
+  const { site, key } = resolveCreds({
+    siteFlag: opts.site,
+    keyFlag: opts.key,
+    config: cfg,
+  });
+  const { cookie, userId } = resolveAuth({ siteFlag: opts.site, config: cfg });
+
+  if (opts.json || opts.compact) {
+    output.write(
+      JSON.stringify({
+        path: configPath(),
+        effective: {
+          site,
+          api_key: key ? maskKey(key) : null,
+          cookie: cookie ? maskCookie(cookie) : null,
+          user_id: userId ?? null,
+        },
+        sources: {
+          site: opts.site
+            ? "flag"
+            : process.env.YNAPI_SITE
+              ? "env"
+              : cfg.site
+                ? "file"
+                : "default",
+          api_key: opts.key
+            ? "flag"
+            : process.env.YNAPI_KEY
+              ? "env"
+              : cfg.api_key
+                ? "file"
+                : "missing",
+          cookie: process.env.YNAPI_COOKIE
+            ? "env"
+            : cfg.cookie
+              ? "file"
+              : "missing",
+          user_id: process.env.YNAPI_USER_ID
+            ? "env"
+            : cfg.user_id
+              ? "file"
+              : "missing",
+        },
+      }) + "\n"
+    );
+    return;
+  }
+
+  const src = (envName, cfgValue, flag) =>
+    flag ? "(flag)" : process.env[envName] ? "(env)" : cfgValue ? "(file)" : "(缺失)";
+
+  output.write(`配置文件   ${configPath()}\n\n`);
+  output.write(`site       ${site} ${src("YNAPI_SITE", cfg.site, opts.site)}\n`);
+  output.write(
+    `api_key    ${key ? maskKey(key) : "(未设置)"} ${src("YNAPI_KEY", cfg.api_key, opts.key)}\n`
+  );
+  output.write(
+    `cookie     ${cookie ? maskCookie(cookie) : "(未设置)"} ${src("YNAPI_COOKIE", cfg.cookie)}\n`
+  );
+  output.write(
+    `user_id    ${userId ?? "(未设置)"} ${src("YNAPI_USER_ID", cfg.user_id)}\n`
+  );
+  output.write(`\n优先级：命令行 flag > 环境变量 > 配置文件 > 默认值\n`);
+}
+
+async function runLogs(cmdOpts) {
+  const opts = program.opts();
+  const cfg = await readConfig();
+  const { site, cookie, userId } = resolveAuth({
+    siteFlag: opts.site,
+    config: cfg,
+  });
+
+  const limit = Number.parseInt(cmdOpts.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) {
+    throw new Error("--limit 必须是正整数");
+  }
+  const days = Number.parseInt(cmdOpts.days, 10);
+  if (!Number.isFinite(days) || days <= 0) {
+    throw new Error("--days 必须是正整数");
+  }
+
+  const endTs = Math.floor(Date.now() / 1000);
+  const startTs = endTs - days * 86400;
+
+  const json = await getSelfLogs(
+    site,
+    { cookie, userId },
+    {
+      page: 0,
+      pageSize: limit,
+      modelName: cmdOpts.model,
+      tokenName: cmdOpts.token,
+      startTs,
+      endTs,
+    }
+  );
+  const items = Array.isArray(json?.data?.items) ? json.data.items : [];
+  const total = json?.data?.total ?? items.length;
+
+  if (opts.json || opts.compact) {
+    output.write(
+      JSON.stringify({
+        range: { start: startTs, end: endTs, days },
+        filters: { model: cmdOpts.model ?? null, token: cmdOpts.token ?? null },
+        total,
+        count: items.length,
+        items,
+      }) + "\n"
+    );
+    return;
+  }
+
+  if (items.length === 0) {
+    output.write(`（无记录）@ ${site} 最近 ${days} 天\n`);
+    return;
+  }
+
+  const fmtTs = (ts) => {
+    const d = new Date(ts * 1000);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  };
+
+  output.write(
+    `共 ${total} 条调用（显示 ${items.length} 条）@ ${site} 最近 ${days} 天\n`
+  );
+  output.write("─".repeat(96) + "\n");
+  output.write(
+    padEndWide("时间", 16) +
+      padEndWide("模型", 32) +
+      padEndWide("tokens(in/out)", 18) +
+      padEndWide("花费($)", 10) +
+      "Token名\n"
+  );
+  for (const it of items) {
+    const time = padEndWide(fmtTs(it.created_at), 16);
+    const model = padEndWide(it.model_name ?? "", 32);
+    const toks = padEndWide(`${it.prompt_tokens ?? 0} / ${it.completion_tokens ?? 0}`, 18);
+    const cost = padEndWide(fmtQuota(it.quota), 10);
+    const tok = it.token_name ?? "";
+    output.write(`${time}${model}${toks}${cost}${tok}\n`);
+  }
+
+  const sum = items.reduce(
+    (acc, it) => {
+      acc.in += it.prompt_tokens ?? 0;
+      acc.out += it.completion_tokens ?? 0;
+      acc.quota += it.quota ?? 0;
+      return acc;
+    },
+    { in: 0, out: 0, quota: 0 }
+  );
+  output.write("─".repeat(96) + "\n");
+  output.write(
+    padEndWide("合计", 16) +
+      padEndWide("", 32) +
+      padEndWide(`${sum.in} / ${sum.out}`, 18) +
+      padEndWide(fmtQuota(sum.quota), 10) +
+      "\n"
+  );
 }

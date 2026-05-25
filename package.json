@@ -1,6 +1,6 @@
 {
   "name": "@herohero96/newapi-cli",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "A tiny CLI to query NewAPI relay station balance, usage, and models from your terminal.",
   "keywords": [
     "newapi",

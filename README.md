@@ -39,11 +39,14 @@ ynapi balance      # 查余额
 | 命令 | 作用 |
 |---|---|
 | `ynapi setup` | 交互式写入 `~/.ynapi/config.json`（中转站 URL + API key） |
-| `ynapi setup --advanced` | 额外配置 cookie + user_id，解锁 `usage` 命令 |
+| `ynapi setup --advanced` | 额外配置 cookie + user_id，解锁 `usage` / `tokens` / `logs` 命令 |
 | `ynapi balance` | 查询当前 key 的余额与用量 |
 | `ynapi models [-q kw]` | 列出中转站可用的模型，`-q` 关键字过滤 |
-| `ynapi usage [--days N]` | 按天查看用量明细（默认 7 天，需要 cookie 鉴权） |
-| `ynapi tokens [-a]` | 列出账号下的所有令牌（需要 cookie 鉴权，`-a` 包含禁用/过期/耗尽的） |
+| `ynapi usage [--days N] [--by-model]` | 按天（或按模型）查看用量明细，需 cookie |
+| `ynapi tokens [-a]` | 列出账号下的所有令牌，`-a` 包含禁用/过期/耗尽的，需 cookie |
+| `ynapi logs [-n N] [-d N] [-m X] [-t X]` | 看每次具体调用的流水明细，可按模型/令牌/天数过滤，需 cookie |
+| `ynapi config show` | 打印当前生效的配置（API key / cookie 自动 mask） |
+| `ynapi status` (`doctor`) | 健康检查：配置文件 / API key / cookie 是否都正常 |
 | `ynapi --help` | 显示帮助 |
 
 ### 全局选项
@@ -52,7 +55,7 @@ ynapi balance      # 查余额
 |---|---|
 | `--site <url>` | 中转站地址（覆盖配置文件） |
 | `--key <sk-...>` | API key（覆盖配置文件） |
-| `--json` | 纯 JSON 输出（适合管道给 jq） |
+| `--json` / `--compact` | 纯 JSON 输出（适合管道给 jq） |
 | `-v, --version` | 打印版本号 |
 
 ### 环境变量
@@ -68,13 +71,13 @@ ynapi balance      # 查余额
 
 ## 关于 `usage` 命令
 
-`balance` 和 `models` 用 API key 就够了，但**按天用量**这种数据 NewAPI 后台只对登陆 session 开放。所以 `usage` 需要你额外提供浏览器 cookie：
+`balance` 和 `models` 用 API key 就够了，但**按天用量、token 列表、调用流水**这种数据 NewAPI 后台只对登陆 session 开放。所以 `usage` / `tokens` / `logs` 需要你额外提供浏览器 cookie：
 
 ```bash
 ynapi setup --advanced
 ```
 
-按提示从浏览器 DevTools 抓一次 cookie 和 `new-api-user` 值粘进去就行。cookie 一般能用几天到几周，过期了重抓即可。
+按提示从浏览器 DevTools 抓一次 cookie 和 `new-api-user` 值粘进去就行。cookie 一般能用几天到几周，过期了重抓即可（命令会提示"Cookie 已过期或失效，重跑 `ynapi setup --advanced`"）。
 
 ```bash
 $ ynapi usage --days 7
@@ -93,6 +96,47 @@ $ ynapi usage --days 7
 ────────────────────────────────────────────────────────────────
 合计           340    4655599   56.8316
 ```
+
+加 `--by-model` 切换成按模型分组（同样的数据，换个聚合维度）：
+
+```bash
+$ ynapi usage --days 7 --by-model
+```
+
+## `logs` 命令：看每次具体调用
+
+`usage` 是日总和，`logs` 是流水明细 — 用来回答「我刚那次调用花了多少」「哪个 token 在偷偷烧钱」这种问题：
+
+```bash
+$ ynapi logs --limit 5 --days 1
+
+共 506 条调用（显示 5 条）@ https://ai.ltcraft.cn 最近 1 天
+─────────────────────────────────────────────────────────────────────
+时间            模型                     tokens(in/out)   花费($)   Token名
+05-25 11:02:26  claude-opus-4-7          0 / 105          0.0813    pc电脑
+05-25 11:02:14  claude-opus-4-7          0 / 83           0.0826    pc电脑
+...
+```
+
+支持服务端过滤：`--model claude` 只看 Claude 调用、`--token pc电脑` 只看某个令牌发的。配 `--json` 管道给 jq 可以做更复杂的分析。
+
+## `status` 命令：一键诊断
+
+命令开始失败时第一件事跑这个：
+
+```bash
+$ ynapi status
+
+ynapi status @ https://ai.ltcraft.cn
+
+  ✓  config     C:\Users\you\.ynapi\config.json
+  ✓  api-key    sk-qAM***hL7m — 余额 ∞ (805ms)
+  ✗  cookie     Cookie 已过期或失效（HTTP 401）。重跑 `ynapi setup --advanced` 粘贴新的 Cookie。
+
+1 项失败
+```
+
+退出码：全过返回 0，有失败返回 1，方便脚本检测。`--json` 输出包含每项的 latency 和 status code，适合监控用。
 
 ## 配合 Claude Code / Cursor / Codex 使用
 

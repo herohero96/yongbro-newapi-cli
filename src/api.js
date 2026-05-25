@@ -60,7 +60,17 @@ async function request(site, path, key, { timeoutMs = 15000 } = {}) {
     },
     timeoutMs
   );
-  return parseResponse(res);
+  try {
+    return await parseResponse(res);
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+      throw new ApiError(
+        `API key 无效或已被禁用（HTTP ${err.status}）。跑 \`ynapi setup\` 重新配置。`,
+        { status: err.status, body: err.body }
+      );
+    }
+    throw err;
+  }
 }
 
 async function requestAuthed(site, path, { cookie, userId, timeoutMs = 15000 } = {}) {
@@ -83,7 +93,17 @@ async function requestAuthed(site, path, { cookie, userId, timeoutMs = 15000 } =
     },
     timeoutMs
   );
-  return parseResponse(res);
+  try {
+    return await parseResponse(res);
+  } catch (err) {
+    if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+      throw new ApiError(
+        `Cookie 已过期或失效（HTTP ${err.status}）。重跑 \`ynapi setup --advanced\` 粘贴新的 Cookie。`,
+        { status: err.status, body: err.body }
+      );
+    }
+    throw err;
+  }
 }
 
 export async function getTokenUsage(site, key) {
@@ -113,4 +133,18 @@ export async function listTokens(site, auth, { page = 0, size = 100 } = {}) {
     size: String(size),
   }).toString();
   return requestAuthed(site, `/api/token/?${qs}`, auth);
+}
+
+export async function getSelfLogs(
+  site,
+  auth,
+  { page = 0, pageSize = 50, modelName, tokenName, startTs, endTs } = {}
+) {
+  const params = { p: String(page), page_size: String(pageSize) };
+  if (modelName) params.model_name = modelName;
+  if (tokenName) params.token_name = tokenName;
+  if (startTs) params.start_timestamp = String(startTs);
+  if (endTs) params.end_timestamp = String(endTs);
+  const qs = new URLSearchParams(params).toString();
+  return requestAuthed(site, `/api/log/self/?${qs}`, auth);
 }
