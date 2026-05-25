@@ -43,6 +43,7 @@ ynapi balance      # 查余额
 | `ynapi balance` | 查询当前 key 的余额与用量 |
 | `ynapi models [-q kw]` | 列出中转站可用的模型，`-q` 关键字过滤 |
 | `ynapi usage [--days N]` | 按天查看用量明细（默认 7 天，需要 cookie 鉴权） |
+| `ynapi tokens [-a]` | 列出账号下的所有令牌（需要 cookie 鉴权，`-a` 包含禁用/过期/耗尽的） |
 | `ynapi --help` | 显示帮助 |
 
 ### 全局选项

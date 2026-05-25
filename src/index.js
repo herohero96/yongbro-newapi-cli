@@ -17,6 +17,7 @@ import {
   listModels,
   getUserSelf,
   getUsageData,
+  listTokens,
 } from "./api.js";
 
 const require = createRequire(import.meta.url);
@@ -55,6 +56,12 @@ program
   .option("-d, --days <n>", "查询最近 N 天（默认 7）", "7")
   .action(runUsage);
 
+program
+  .command("tokens")
+  .description("列出账号下的所有令牌（需要 cookie 鉴权）")
+  .option("-a, --all", "也显示已禁用 / 已过期 / 已耗尽的令牌")
+  .action(runTokens);
+
 program.addHelpText(
   "after",
   `
@@ -67,6 +74,8 @@ program.addHelpText(
   $ ynapi models -q claude                       # 只看含 claude 的
   $ ynapi usage                                  # 最近 7 天用量
   $ ynapi usage --days 30                        # 最近 30 天
+  $ ynapi tokens                                 # 列出所有令牌
+  $ ynapi tokens -a                              # 包含禁用/过期/耗尽的
   $ ynapi --site https://other.com --key sk-xxx balance
 
 环境变量:
@@ -309,4 +318,88 @@ async function runUsage(cmdOpts) {
   output.write(
     `合计        ${String(total.count).padStart(6)}  ${String(total.tokens).padStart(9)}  ${fmt(total.quota).padStart(8)}\n`
   );
+}
+
+const TOKEN_STATUS = {
+  1: "正常",
+  2: "禁用",
+  3: "过期",
+  4: "耗尽",
+};
+
+function strWidth(s) {
+  let w = 0;
+  for (const ch of String(s)) {
+    const cp = ch.codePointAt(0);
+    w += cp > 0x2e80 && cp < 0xfb00 ? 2 : 1;
+  }
+  return w;
+}
+
+function padEndWide(s, width) {
+  const diff = width - strWidth(s);
+  return diff > 0 ? String(s) + " ".repeat(diff) : String(s);
+}
+
+async function runTokens(cmdOpts) {
+  const opts = program.opts();
+  const cfg = await readConfig();
+  const { site, cookie, userId } = resolveAuth({
+    siteFlag: opts.site,
+    config: cfg,
+  });
+
+  const json = await listTokens(site, { cookie, userId }, { page: 0, size: 100 });
+  const items = Array.isArray(json?.data?.items) ? json.data.items : [];
+  const total = json?.data?.total ?? items.length;
+
+  let visible = items;
+  if (!cmdOpts.all) {
+    visible = items.filter((t) => t.status === 1);
+  }
+
+  if (opts.json) {
+    output.write(JSON.stringify({ total, count: visible.length, items: visible }) + "\n");
+    return;
+  }
+
+  const fmt = (n) => {
+    if (typeof n !== "number") return String(n);
+    return (n / 500000).toFixed(4);
+  };
+  const fmtTime = (ts) => {
+    if (!ts || ts <= 0) return "—";
+    const d = new Date(ts * 1000);
+    const today = new Date();
+    if (d.toDateString() === today.toDateString()) return "今天";
+    return d.toISOString().slice(0, 10);
+  };
+  const fmtExpire = (ts) => (!ts || ts === -1 ? "永不过期" : new Date(ts * 1000).toISOString().slice(0, 10));
+
+  if (visible.length === 0) {
+    output.write(cmdOpts.all ? "（无令牌）\n" : "（无可用令牌，加 -a 看全部）\n");
+    return;
+  }
+
+  output.write(`共 ${total} 个令牌（显示 ${visible.length} 个）@ ${site}\n`);
+  output.write("─".repeat(86) + "\n");
+  output.write(
+    padEndWide("名称", 28) +
+      padEndWide("状态", 6) +
+      padEndWide("组", 10) +
+      padEndWide("已用($)", 12) +
+      padEndWide("剩余", 14) +
+      padEndWide("过期", 14) +
+      "最近使用\n"
+  );
+  for (const t of visible) {
+    const name = padEndWide(t.name ?? "", 28);
+    const status = padEndWide(TOKEN_STATUS[t.status] ?? `?(${t.status})`, 6);
+    const group = padEndWide(t.group ?? "", 10);
+    const used = padEndWide(fmt(t.used_quota), 12);
+    const remain = padEndWide(t.unlimited_quota ? "∞" : fmt(t.remain_quota), 14);
+    const expire = padEndWide(fmtExpire(t.expired_time), 14);
+    const accessed = fmtTime(t.accessed_time);
+    output.write(`${name}${status}${group}${used}${remain}${expire}${accessed}\n`);
+  }
 }

@@ -106,3 +106,11 @@ export async function getUsageData(site, auth, { startTs, endTs }) {
   }).toString();
   return requestAuthed(site, `/api/data/self/?${qs}`, auth);
 }
+
+export async function listTokens(site, auth, { page = 0, size = 100 } = {}) {
+  const qs = new URLSearchParams({
+    p: String(page),
+    size: String(size),
+  }).toString();
+  return requestAuthed(site, `/api/token/?${qs}`, auth);
+}
