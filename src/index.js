@@ -31,7 +31,8 @@ program
   .version(pkg.version, "-v, --version", "打印版本号")
   .option("--site <url>", "中转站地址（覆盖配置）")
   .option("--key <sk-...>", "API key（覆盖配置）")
-  .option("--json", "纯 JSON 输出（适合管道）");
+  .option("--json", "纯 JSON 输出（适合管道给 jq）")
+  .option("--compact", "--json 的别名（与 job-pro 风格一致）");
 
 program
   .command("setup")
@@ -70,6 +71,7 @@ program.addHelpText(
   $ ynapi setup --advanced                       # 额外配置 cookie（解锁 usage）
   $ ynapi balance                                # 查余额
   $ ynapi balance --json | jq                    # 管道用
+  $ ynapi tokens --compact                       # 同 --json，与 job-pro 一致
   $ ynapi models                                 # 列所有模型
   $ ynapi models -q claude                       # 只看含 claude 的
   $ ynapi usage                                  # 最近 7 天用量
@@ -155,7 +157,7 @@ async function runBalance() {
   const json = await getTokenUsage(site, key);
   const data = json?.data ?? {};
 
-  if (opts.json) {
+  if (opts.json || opts.compact) {
     output.write(JSON.stringify(json) + "\n");
     return;
   }
@@ -203,7 +205,7 @@ async function runModels(cmdOpts) {
     models = models.filter((m) => (m.id ?? "").toLowerCase().includes(q));
   }
 
-  if (opts.json) {
+  if (opts.json || opts.compact) {
     output.write(JSON.stringify({ count: models.length, data: models }) + "\n");
     return;
   }
@@ -250,7 +252,7 @@ async function runUsage(cmdOpts) {
   const user = userJson?.data ?? {};
   const buckets = Array.isArray(usageJson?.data) ? usageJson.data : [];
 
-  if (opts.json) {
+  if (opts.json || opts.compact) {
     output.write(
       JSON.stringify({
         range: { start: startTs, end: endTs, days },
@@ -358,7 +360,7 @@ async function runTokens(cmdOpts) {
     visible = items.filter((t) => t.status === 1);
   }
 
-  if (opts.json) {
+  if (opts.json || opts.compact) {
     output.write(JSON.stringify({ total, count: visible.length, items: visible }) + "\n");
     return;
   }
