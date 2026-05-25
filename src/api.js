@@ -7,13 +7,14 @@ export class ApiError extends Error {
   }
 }
 
-async function doFetch(url, headers, timeoutMs) {
+async function doFetch(url, { method = "GET", headers, body, timeoutMs }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
-      method: "GET",
+      method,
       headers,
+      body,
       redirect: "follow",
       signal: controller.signal,
     });
@@ -52,14 +53,14 @@ async function parseResponse(res) {
 }
 
 async function request(site, path, key, { timeoutMs = 15000 } = {}) {
-  const res = await doFetch(
-    `${site}${path}`,
-    {
+  const res = await doFetch(`${site}${path}`, {
+    method: "GET",
+    headers: {
       Authorization: `Bearer ${key}`,
       Accept: "application/json",
     },
-    timeoutMs
-  );
+    timeoutMs,
+  });
   try {
     return await parseResponse(res);
   } catch (err) {
@@ -73,7 +74,11 @@ async function request(site, path, key, { timeoutMs = 15000 } = {}) {
   }
 }
 
-async function requestAuthed(site, path, { cookie, userId, timeoutMs = 15000 } = {}) {
+async function requestAuthed(
+  site,
+  path,
+  { cookie, userId, method = "GET", body, timeoutMs = 15000 } = {}
+) {
   if (!cookie) {
     throw new ApiError(
       "缺少 cookie。先跑 `ynapi setup --advanced`，或通过 YNAPI_COOKIE 提供。"
@@ -84,15 +89,22 @@ async function requestAuthed(site, path, { cookie, userId, timeoutMs = 15000 } =
       "缺少 user_id。先跑 `ynapi setup --advanced`，或通过 YNAPI_USER_ID 提供。"
     );
   }
-  const res = await doFetch(
-    `${site}${path}`,
-    {
-      Accept: "application/json",
-      Cookie: cookie,
-      "new-api-user": String(userId),
-    },
-    timeoutMs
-  );
+  const headers = {
+    Accept: "application/json",
+    Cookie: cookie,
+    "new-api-user": String(userId),
+  };
+  let serializedBody;
+  if (body !== undefined && body !== null) {
+    headers["Content-Type"] = "application/json";
+    serializedBody = JSON.stringify(body);
+  }
+  const res = await doFetch(`${site}${path}`, {
+    method,
+    headers,
+    body: serializedBody,
+    timeoutMs,
+  });
   try {
     return await parseResponse(res);
   } catch (err) {
@@ -147,4 +159,35 @@ export async function getSelfLogs(
   if (endTs) params.end_timestamp = String(endTs);
   const qs = new URLSearchParams(params).toString();
   return requestAuthed(site, `/api/log/self/?${qs}`, auth);
+}
+
+export async function getToken(site, auth, id) {
+  return requestAuthed(site, `/api/token/${id}`, auth);
+}
+
+export async function createToken(site, auth, fields) {
+  const body = {
+    name: fields.name,
+    remain_quota: fields.remain_quota ?? 0,
+    expired_time: fields.expired_time ?? -1,
+    unlimited_quota: fields.unlimited_quota ?? false,
+    model_limits_enabled: fields.model_limits_enabled ?? false,
+    model_limits: fields.model_limits ?? "",
+    allow_ips: fields.allow_ips ?? "",
+    group: fields.group ?? "",
+  };
+  return requestAuthed(site, "/api/token/", { ...auth, method: "POST", body });
+}
+
+export async function updateToken(site, auth, fullToken, { statusOnly = false } = {}) {
+  const path = statusOnly ? "/api/token/?status_only=true" : "/api/token/";
+  return requestAuthed(site, path, {
+    ...auth,
+    method: "PUT",
+    body: fullToken,
+  });
+}
+
+export async function deleteToken(site, auth, id) {
+  return requestAuthed(site, `/api/token/${id}`, { ...auth, method: "DELETE" });
 }

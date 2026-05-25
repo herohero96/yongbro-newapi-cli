@@ -19,6 +19,10 @@ import {
   getUsageData,
   listTokens,
   getSelfLogs,
+  getToken,
+  createToken,
+  updateToken,
+  deleteToken,
   ApiError,
 } from "./api.js";
 
@@ -90,6 +94,52 @@ configCmd
   .description("打印当前生效的配置（API key / cookie 自动 mask）")
   .action(runConfigShow);
 
+const tokenCmd = program
+  .command("token")
+  .description("管理账号下的令牌（增删改）— 需要 cookie 鉴权");
+
+tokenCmd
+  .command("create <name>")
+  .description("创建一个新令牌")
+  .option("-q, --quota <n>", "额度（NewAPI 内部 quota 单位，1美元≈500000）", "0")
+  .option("-u, --unlimited", "无限额度")
+  .option("-e, --expires <date>", "过期时间（ISO 日期 yyyy-mm-dd 或 unix 秒；默认永不过期）")
+  .option("-g, --group <name>", "分组")
+  .option("--allow-ips <list>", "IP 白名单（逗号分隔）")
+  .option("--model-limits <list>", "限制可调用模型（逗号分隔；留空=不限制）")
+  .action(runTokenCreate);
+
+tokenCmd
+  .command("update <idOrName>")
+  .description("修改令牌（按 id 或 name 定位）")
+  .option("--name <new>", "改名字")
+  .option("-q, --quota <n>", "改额度")
+  .option("-u, --unlimited", "改成无限额度")
+  .option("--limited", "改成有限额度（取消无限）")
+  .option("-e, --expires <date>", "改过期时间（ISO 日期 / unix 秒 / 'never' 表示永不过期）")
+  .option("-g, --group <name>", "改分组")
+  .option("--allow-ips <list>", "改 IP 白名单")
+  .option("--model-limits <list>", "改可调用模型限制")
+  .option("--status <n>", "改状态（1=正常 2=禁用 3=过期 4=耗尽）")
+  .action(runTokenUpdate);
+
+tokenCmd
+  .command("delete <idOrName>")
+  .alias("rm")
+  .description("删除令牌（默认会让你确认一次）")
+  .option("-y, --yes", "跳过确认直接删")
+  .action(runTokenDelete);
+
+tokenCmd
+  .command("enable <idOrName>")
+  .description("启用令牌（设 status=1，等同 update --status 1）")
+  .action((idOrName) => runTokenSetStatus(idOrName, 1));
+
+tokenCmd
+  .command("disable <idOrName>")
+  .description("禁用令牌（设 status=2，等同 update --status 2）")
+  .action((idOrName) => runTokenSetStatus(idOrName, 2));
+
 program
   .command("status")
   .alias("doctor")
@@ -112,6 +162,14 @@ program.addHelpText(
   $ ynapi usage --by-model                       # 按模型分组而不是按天
   $ ynapi tokens                                 # 列出所有令牌
   $ ynapi tokens -a                              # 包含禁用/过期/耗尽的
+  $ ynapi token create "测试令牌" -q 500000      # 新建（quota = 1美元）
+  $ ynapi token create "无限token" --unlimited
+  $ ynapi token update 1234 -q 1000000           # 改额度（按 id 定位）
+  $ ynapi token update "测试令牌" --name "新名字"  # 改名（按 name 定位）
+  $ ynapi token disable "测试令牌"                # 禁用
+  $ ynapi token enable "测试令牌"                 # 启用
+  $ ynapi token delete 1234                      # 删（会要求 y/n 确认）
+  $ ynapi token rm 1234 -y                       # 删，跳过确认
   $ ynapi logs                                   # 最近 50 条调用流水
   $ ynapi logs --limit 200 --days 1              # 今天的最近 200 条
   $ ynapi logs --model claude                    # 只看 claude-* 调用
@@ -771,4 +829,231 @@ async function runLogs(cmdOpts) {
       padEndWide(fmtQuota(sum.quota), 10) +
       "\n"
   );
+}
+
+function parseExpires(input) {
+  if (input === undefined || input === null || input === "") return undefined;
+  if (input === "never" || input === "-1") return -1;
+  if (/^\d+$/.test(input)) return Number(input);
+  const ts = Date.parse(input);
+  if (Number.isNaN(ts)) {
+    throw new Error(`无法解析过期时间："${input}"。用 ISO 日期 (2026-12-31)、unix 秒数、或 'never'`);
+  }
+  return Math.floor(ts / 1000);
+}
+
+function parseQuota(input) {
+  if (input === undefined || input === null || input === "") return undefined;
+  const n = Number(input);
+  if (!Number.isFinite(n) || n < 0) {
+    throw new Error(`额度必须是非负数字，收到 "${input}"`);
+  }
+  return Math.floor(n);
+}
+
+async function findTokenByIdOrName(site, auth, idOrName) {
+  if (/^\d+$/.test(idOrName)) {
+    const json = await getToken(site, auth, idOrName);
+    if (!json?.data) {
+      throw new Error(`找不到 id=${idOrName} 的令牌`);
+    }
+    return json.data;
+  }
+  const listJson = await listTokens(site, auth, { page: 0, size: 100 });
+  const items = Array.isArray(listJson?.data?.items) ? listJson.data.items : [];
+  const matches = items.filter((t) => t.name === idOrName);
+  if (matches.length === 0) {
+    throw new Error(`找不到名为 "${idOrName}" 的令牌（可用 id 数字定位）`);
+  }
+  if (matches.length > 1) {
+    const ids = matches.map((t) => t.id).join(", ");
+    throw new Error(
+      `名为 "${idOrName}" 的令牌有 ${matches.length} 个（id=${ids}）。请改用 id 数字定位。`
+    );
+  }
+  return matches[0];
+}
+
+async function runTokenCreate(name, cmdOpts) {
+  const opts = program.opts();
+  const cfg = await readConfig();
+  const { site, cookie, userId } = resolveAuth({ siteFlag: opts.site, config: cfg });
+
+  if (!name || !name.trim()) {
+    throw new Error("令牌名字不能为空");
+  }
+
+  const fields = {
+    name: name.trim(),
+    remain_quota: parseQuota(cmdOpts.quota) ?? 0,
+    expired_time: parseExpires(cmdOpts.expires) ?? -1,
+    unlimited_quota: !!cmdOpts.unlimited,
+    group: cmdOpts.group ?? "",
+    allow_ips: cmdOpts.allowIps ?? "",
+    model_limits: cmdOpts.modelLimits ?? "",
+    model_limits_enabled: !!(cmdOpts.modelLimits && cmdOpts.modelLimits.length > 0),
+  };
+
+  await createToken(site, { cookie, userId }, fields);
+
+  // 创建接口不返回 id，需要列一次找回来
+  const listJson = await listTokens(site, { cookie, userId }, { page: 0, size: 20 });
+  const items = Array.isArray(listJson?.data?.items) ? listJson.data.items : [];
+  const created = items
+    .filter((t) => t.name === fields.name)
+    .sort((a, b) => (b.created_time ?? 0) - (a.created_time ?? 0))[0];
+
+  if (opts.json || opts.compact) {
+    output.write(JSON.stringify({ created: created ?? { name: fields.name } }) + "\n");
+    return;
+  }
+
+  output.write(`✓ 已创建令牌 "${fields.name}"\n`);
+  if (created) {
+    output.write(`  id           ${created.id}\n`);
+    output.write(`  状态         ${TOKEN_STATUS[created.status] ?? created.status}\n`);
+    output.write(
+      `  额度         ${created.unlimited_quota ? "∞ 无限" : fmtQuota(created.remain_quota)}\n`
+    );
+    output.write(
+      `  过期         ${created.expired_time === -1 ? "永不过期" : new Date(created.expired_time * 1000).toISOString().slice(0, 10)}\n`
+    );
+    if (created.group) output.write(`  分组         ${created.group}\n`);
+  }
+  output.write(`\n注：sk- 完整密钥请到中转站后台复制（NewAPI 服务端不通过 API 返回明文）。\n`);
+}
+
+async function runTokenUpdate(idOrName, cmdOpts) {
+  const opts = program.opts();
+  const cfg = await readConfig();
+  const { site, cookie, userId } = resolveAuth({ siteFlag: opts.site, config: cfg });
+  const auth = { cookie, userId };
+
+  const current = await findTokenByIdOrName(site, auth, idOrName);
+
+  const next = { ...current };
+  if (cmdOpts.name !== undefined) next.name = cmdOpts.name;
+  const q = parseQuota(cmdOpts.quota);
+  if (q !== undefined) next.remain_quota = q;
+  if (cmdOpts.unlimited) next.unlimited_quota = true;
+  if (cmdOpts.limited) next.unlimited_quota = false;
+  const exp = parseExpires(cmdOpts.expires);
+  if (exp !== undefined) next.expired_time = exp;
+  if (cmdOpts.group !== undefined) next.group = cmdOpts.group;
+  if (cmdOpts.allowIps !== undefined) next.allow_ips = cmdOpts.allowIps;
+  if (cmdOpts.modelLimits !== undefined) {
+    next.model_limits = cmdOpts.modelLimits;
+    next.model_limits_enabled = cmdOpts.modelLimits.length > 0;
+  }
+  if (cmdOpts.status !== undefined) {
+    const s = Number(cmdOpts.status);
+    if (![1, 2, 3, 4].includes(s)) {
+      throw new Error("--status 必须是 1/2/3/4");
+    }
+    const otherChanged =
+      cmdOpts.name !== undefined ||
+      cmdOpts.quota !== undefined ||
+      cmdOpts.unlimited ||
+      cmdOpts.limited ||
+      cmdOpts.expires !== undefined ||
+      cmdOpts.group !== undefined ||
+      cmdOpts.allowIps !== undefined ||
+      cmdOpts.modelLimits !== undefined;
+    if (otherChanged) {
+      throw new Error(
+        "--status 必须单独使用（NewAPI 服务端约束）。请分两次：先改 status，再改其他字段。"
+      );
+    }
+    next.status = s;
+  }
+
+  if (JSON.stringify(next) === JSON.stringify(current)) {
+    output.write("（无字段变化，未发送请求）\n");
+    return;
+  }
+
+  const statusOnly = cmdOpts.status !== undefined;
+  const json = await updateToken(site, auth, next, { statusOnly });
+  const updated = json?.data ?? next;
+
+  if (opts.json || opts.compact) {
+    output.write(JSON.stringify({ updated }) + "\n");
+    return;
+  }
+
+  output.write(`✓ 已更新令牌 id=${updated.id} name="${updated.name}"\n`);
+  const changes = [];
+  for (const k of [
+    "name",
+    "remain_quota",
+    "unlimited_quota",
+    "expired_time",
+    "group",
+    "allow_ips",
+    "model_limits",
+    "status",
+  ]) {
+    if (current[k] !== updated[k]) {
+      changes.push(`  ${k}: ${JSON.stringify(current[k])} → ${JSON.stringify(updated[k])}`);
+    }
+  }
+  if (changes.length > 0) output.write(changes.join("\n") + "\n");
+}
+
+async function runTokenSetStatus(idOrName, status) {
+  const opts = program.opts();
+  const cfg = await readConfig();
+  const { site, cookie, userId } = resolveAuth({ siteFlag: opts.site, config: cfg });
+  const auth = { cookie, userId };
+  const current = await findTokenByIdOrName(site, auth, idOrName);
+  if (current.status === status) {
+    output.write(`（令牌 "${current.name}" 已经是 ${TOKEN_STATUS[status]} 状态，未发送请求）\n`);
+    return;
+  }
+  const json = await updateToken(site, auth, { ...current, status }, { statusOnly: true });
+  const updated = json?.data ?? { ...current, status };
+  if (opts.json || opts.compact) {
+    output.write(JSON.stringify({ updated }) + "\n");
+    return;
+  }
+  output.write(
+    `✓ 令牌 "${updated.name}" (id=${updated.id}) 状态：${TOKEN_STATUS[current.status]} → ${TOKEN_STATUS[updated.status]}\n`
+  );
+}
+
+async function confirmYesNo(prompt) {
+  const rl = createInterface({ input, output });
+  try {
+    const ans = (await rl.question(prompt)).trim().toLowerCase();
+    return ans === "y" || ans === "yes";
+  } finally {
+    rl.close();
+  }
+}
+
+async function runTokenDelete(idOrName, cmdOpts) {
+  const opts = program.opts();
+  const cfg = await readConfig();
+  const { site, cookie, userId } = resolveAuth({ siteFlag: opts.site, config: cfg });
+  const auth = { cookie, userId };
+
+  const current = await findTokenByIdOrName(site, auth, idOrName);
+
+  if (!cmdOpts.yes) {
+    const ok = await confirmYesNo(
+      `确认删除令牌 "${current.name}" (id=${current.id})？此操作不可恢复 [y/N]: `
+    );
+    if (!ok) {
+      output.write("已取消\n");
+      return;
+    }
+  }
+
+  await deleteToken(site, auth, current.id);
+
+  if (opts.json || opts.compact) {
+    output.write(JSON.stringify({ deleted: { id: current.id, name: current.name } }) + "\n");
+    return;
+  }
+  output.write(`✓ 已删除令牌 "${current.name}" (id=${current.id})\n`);
 }

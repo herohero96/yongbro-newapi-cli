@@ -44,6 +44,10 @@ ynapi balance      # 查余额
 | `ynapi models [-q kw]` | 列出中转站可用的模型，`-q` 关键字过滤 |
 | `ynapi usage [--days N] [--by-model]` | 按天（或按模型）查看用量明细，需 cookie |
 | `ynapi tokens [-a]` | 列出账号下的所有令牌，`-a` 包含禁用/过期/耗尽的，需 cookie |
+| `ynapi token create <name> [...]` | 新建令牌，需 cookie |
+| `ynapi token update <id\|name> [...]` | 修改令牌（按 id 或 name 定位），需 cookie |
+| `ynapi token enable\|disable <id\|name>` | 启用 / 禁用令牌 |
+| `ynapi token delete <id\|name>` | 删除令牌（默认 y/n 确认，`-y` 跳过） |
 | `ynapi logs [-n N] [-d N] [-m X] [-t X]` | 看每次具体调用的流水明细，可按模型/令牌/天数过滤，需 cookie |
 | `ynapi config show` | 打印当前生效的配置（API key / cookie 自动 mask） |
 | `ynapi status` (`doctor`) | 健康检查：配置文件 / API key / cookie 是否都正常 |
@@ -137,6 +141,31 @@ ynapi status @ https://ai.ltcraft.cn
 ```
 
 退出码：全过返回 0，有失败返回 1，方便脚本检测。`--json` 输出包含每项的 latency 和 status code，适合监控用。
+
+## `token` 命令：增删改令牌
+
+`tokens` 是只读列表，`token` 是写操作（按 id 或 name 定位都行）：
+
+```bash
+# 新建（额度按 NewAPI 内部 quota 单位，1 美元 ≈ 500000）
+ynapi token create "测试令牌" -q 500000
+ynapi token create "无限 token" --unlimited --expires 2026-12-31
+
+# 改（按 name 或 id 定位都行）
+ynapi token update "测试令牌" -q 1000000        # 改额度
+ynapi token update 1234 --name "新名字"           # 改名
+ynapi token update "测试令牌" --limited           # 取消无限额度
+
+# 启用 / 禁用
+ynapi token disable "测试令牌"
+ynapi token enable "测试令牌"
+
+# 删（默认要 y/n 确认）
+ynapi token delete "测试令牌"
+ynapi token rm 1234 -y                           # 跳过确认
+```
+
+⚠️ **完整 sk- 密钥仅能在中转站后台复制** — NewAPI 服务端不通过 API 返回明文，CLI 只能拿到 mask 过的（`DNl9**********seer`）。新建后请到后台复制完整 key。
 
 ## 配合 Claude Code / Cursor / Codex 使用
 
