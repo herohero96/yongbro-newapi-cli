@@ -10,6 +10,11 @@ import {
   configPath,
   resolveCreds,
   resolveAuth,
+  listProfiles,
+  useProfile,
+  renameProfile,
+  removeProfile,
+  validateProfileName,
   DEFAULT_SITE,
 } from "./config.js";
 import {
@@ -51,6 +56,13 @@ const EXIT = {
   NOT_FOUND: 8,
 };
 
+function activeProfile() {
+  return program.opts().profile;
+}
+async function readActiveConfig() {
+  return readConfig(activeProfile());
+}
+
 function classifyError(err) {
   const msg = err?.message ?? "";
   if (err instanceof ApiError) {
@@ -83,6 +95,7 @@ program
   有哪些模型可用              → models [-q kw]
   列出我账号下所有 sk- 令牌    → tokens         （只读复数）
   新建 / 改 / 删 sk- 令牌      → token <子命令> （CRUD 单数）
+  多个中转站切换              → profile use <name>  或  --profile <name>
 
 鉴权速查:
   [需 key]    balance / models                  — API key（Bearer）
@@ -90,6 +103,7 @@ program
   [无需鉴权]  setup / status / config show`
   )
   .version(pkg.version, "-v, --version", "打印版本号")
+  .option("-p, --profile <name>", "使用指定 profile（覆盖默认；YNAPI_PROFILE 也可）")
   .option("--site <url>", "中转站地址（覆盖配置）")
   .option("--key <sk-...>", "API key（覆盖配置）")
   .option("--json", "纯 JSON 输出（适合管道给 jq / AI 处理）")
@@ -99,6 +113,7 @@ program
   .command("setup")
   .description("[初始化] 交互式写入配置（中转站 URL + API key）")
   .option("--advanced", "高级模式：额外配置 cookie + user_id（解锁 usage / tokens / token / logs）")
+  .option("-p, --profile <name>", "指定要配置的 profile 名（不指定就用全局 --profile 或当前默认）")
   .action(runSetup);
 
 program
@@ -215,11 +230,42 @@ program
   )
   .action(runStatus);
 
+const profileCmd = program
+  .command("profile")
+  .description("[本地] 管理多个中转站 profile（list / use / rename / remove）");
+
+profileCmd
+  .command("list")
+  .alias("ls")
+  .description("列出所有 profile，标记当前默认")
+  .action(runProfileList);
+
+profileCmd
+  .command("use <name>")
+  .description("切换默认 profile（影响后续命令）")
+  .action(runProfileUse);
+
+profileCmd
+  .command("rename <oldName> <newName>")
+  .description("重命名 profile")
+  .action(runProfileRename);
+
+profileCmd
+  .command("remove <name>")
+  .alias("rm")
+  .description("删除 profile（默认 y/n 确认；不能删除当前默认）")
+  .option("-y, --yes", "跳过确认")
+  .action(runProfileRemove);
+
 program.addHelpText(
   "after",
   `
 示例:
   $ ynapi setup                                  # 首次配置
+  $ ynapi setup --profile testapi                # 新建第二个 profile
+  $ ynapi profile list                           # 看所有 profile
+  $ ynapi profile use testapi                    # 切默认 profile
+  $ ynapi --profile testapi balance              # 临时用某个 profile
   $ ynapi setup --advanced                       # 额外配置 cookie（解锁 usage / token 等）
   $ ynapi snapshot --json                        # ★ AI 一站式入口：账号 + key + 健康一次拉
   $ ynapi account                                # 账号总余额（"还剩多少钱"）
@@ -237,6 +283,7 @@ program.addHelpText(
   $ ynapi --site https://other.com --key sk-xxx balance
 
 环境变量:
+  YNAPI_PROFILE    当前 profile 名（覆盖配置文件里的 current）
   YNAPI_SITE       中转站 URL（覆盖配置文件）
   YNAPI_KEY        API key（覆盖配置文件）
   YNAPI_COOKIE     浏览器 cookie（cookie-class 命令用）
@@ -282,8 +329,13 @@ program.parseAsync(process.argv).catch((err) => {
 
 async function runSetup(cmdOpts) {
   const rl = createInterface({ input, output });
-  const existing = (await readConfig()) ?? {};
+  const targetProfile = cmdOpts.profile || activeProfile();
+  if (targetProfile) validateProfileName(targetProfile);
+  const existing = (await readConfig(targetProfile)) ?? {};
   try {
+    if (targetProfile) {
+      output.write(`配置 profile: ${targetProfile}${existing.site ? "（已存在，将更新）" : "（新建）"}\n`);
+    }
     const siteAns = await rl.question(
       `中转站 URL [${existing.site || DEFAULT_SITE}]: `
     );
@@ -319,8 +371,8 @@ async function runSetup(cmdOpts) {
       if (!next.user_id) throw new Error("user_id 不能为空");
     }
 
-    await writeConfig(next);
-    output.write(`✓ 已写入 ${configPath()}\n`);
+    await writeConfig(next, targetProfile);
+    output.write(`✓ 已写入 ${configPath()}${targetProfile ? `（profile: ${targetProfile}）` : ""}\n`);
   } finally {
     rl.close();
   }
@@ -328,7 +380,7 @@ async function runSetup(cmdOpts) {
 
 async function runBalance() {
   const opts = program.opts();
-  const cfg = await readConfig();
+  const cfg = await readActiveConfig();
   const { site, key } = resolveCreds({
     siteFlag: opts.site,
     keyFlag: opts.key,
@@ -414,7 +466,7 @@ async function runBalance() {
 
 async function runAccount() {
   const opts = program.opts();
-  const cfg = await readConfig();
+  const cfg = await readActiveConfig();
   const { site, cookie, userId } = resolveAuth({ siteFlag: opts.site, config: cfg });
 
   const userJson = await getUserSelf(site, { cookie, userId });
@@ -445,7 +497,7 @@ async function runAccount() {
 
 async function runSnapshot() {
   const opts = program.opts();
-  const cfg = await readConfig();
+  const cfg = await readActiveConfig();
   const { site, key } = resolveCreds({
     siteFlag: opts.site,
     keyFlag: opts.key,
@@ -546,7 +598,7 @@ async function runSnapshot() {
   }
 }async function runModels(cmdOpts) {
   const opts = program.opts();
-  const cfg = await readConfig();
+  const cfg = await readActiveConfig();
   const { site, key } = resolveCreds({
     siteFlag: opts.site,
     keyFlag: opts.key,
@@ -589,7 +641,7 @@ async function runSnapshot() {
 
 async function runUsage(cmdOpts) {
   const opts = program.opts();
-  const cfg = await readConfig();
+  const cfg = await readActiveConfig();
   const { site, cookie, userId } = resolveAuth({
     siteFlag: opts.site,
     config: cfg,
@@ -744,7 +796,7 @@ function padEndWide(s, width) {
 
 async function runTokens(cmdOpts) {
   const opts = program.opts();
-  const cfg = await readConfig();
+  const cfg = await readActiveConfig();
   const { site, cookie, userId } = resolveAuth({
     siteFlag: opts.site,
     config: cfg,
@@ -809,7 +861,7 @@ function maskKey(k) {
 
 async function runStatus() {
   const opts = program.opts();
-  const cfg = await readConfig();
+  const cfg = await readActiveConfig();
   const { site, key } = resolveCreds({
     siteFlag: opts.site,
     keyFlag: opts.key,
@@ -934,7 +986,9 @@ function maskCookie(c) {
 
 async function runConfigShow() {
   const opts = program.opts();
-  const cfg = (await readConfig()) ?? {};
+  const cfg = (await readActiveConfig()) ?? {};
+  const { current, names } = await listProfiles();
+  const activeName = activeProfile() || process.env.YNAPI_PROFILE || current;
   const { site, key } = resolveCreds({
     siteFlag: opts.site,
     keyFlag: opts.key,
@@ -946,6 +1000,7 @@ async function runConfigShow() {
     output.write(
       JSON.stringify({
         path: configPath(),
+        profile: { active: activeName, current, all: names },
         effective: {
           site,
           api_key: key ? maskKey(key) : null,
@@ -986,7 +1041,13 @@ async function runConfigShow() {
   const src = (envName, cfgValue, flag) =>
     flag ? "(flag)" : process.env[envName] ? "(env)" : cfgValue ? "(file)" : "(缺失)";
 
-  output.write(`配置文件   ${configPath()}\n\n`);
+  output.write(`配置文件   ${configPath()}\n`);
+  output.write(`profile    ${activeName ?? "(未设置)"}（默认：${current ?? "—"}）\n`);
+  if (names.length > 1) {
+    const others = names.filter((n) => n !== activeName);
+    output.write(`其他       ${others.join(", ")}\n`);
+  }
+  output.write("\n");
   output.write(`site       ${site} ${src("YNAPI_SITE", cfg.site, opts.site)}\n`);
   output.write(
     `api_key    ${key ? maskKey(key) : "(未设置)"} ${src("YNAPI_KEY", cfg.api_key, opts.key)}\n`
@@ -1002,7 +1063,7 @@ async function runConfigShow() {
 
 async function runLogs(cmdOpts) {
   const opts = program.opts();
-  const cfg = await readConfig();
+  const cfg = await readActiveConfig();
   const { site, cookie, userId } = resolveAuth({
     siteFlag: opts.site,
     config: cfg,
@@ -1143,7 +1204,7 @@ async function findTokenByIdOrName(site, auth, idOrName) {
 
 async function runTokenCreate(name, cmdOpts) {
   const opts = program.opts();
-  const cfg = await readConfig();
+  const cfg = await readActiveConfig();
   const { site, cookie, userId } = resolveAuth({ siteFlag: opts.site, config: cfg });
 
   if (!name || !name.trim()) {
@@ -1192,7 +1253,7 @@ async function runTokenCreate(name, cmdOpts) {
 
 async function runTokenUpdate(idOrName, cmdOpts) {
   const opts = program.opts();
-  const cfg = await readConfig();
+  const cfg = await readActiveConfig();
   const { site, cookie, userId } = resolveAuth({ siteFlag: opts.site, config: cfg });
   const auth = { cookie, userId };
 
@@ -1269,7 +1330,7 @@ async function runTokenUpdate(idOrName, cmdOpts) {
 
 async function runTokenSetStatus(idOrName, status) {
   const opts = program.opts();
-  const cfg = await readConfig();
+  const cfg = await readActiveConfig();
   const { site, cookie, userId } = resolveAuth({ siteFlag: opts.site, config: cfg });
   const auth = { cookie, userId };
   const current = await findTokenByIdOrName(site, auth, idOrName);
@@ -1300,7 +1361,7 @@ async function confirmYesNo(prompt) {
 
 async function runTokenDelete(idOrName, cmdOpts) {
   const opts = program.opts();
-  const cfg = await readConfig();
+  const cfg = await readActiveConfig();
   const { site, cookie, userId } = resolveAuth({ siteFlag: opts.site, config: cfg });
   const auth = { cookie, userId };
 
@@ -1323,4 +1384,67 @@ async function runTokenDelete(idOrName, cmdOpts) {
     return;
   }
   output.write(`✓ 已删除令牌 "${current.name}" (id=${current.id})\n`);
+}
+
+async function runProfileList() {
+  const opts = program.opts();
+  const { current, names } = await listProfiles();
+  const active = activeProfile() || process.env.YNAPI_PROFILE || current;
+
+  if (opts.json || opts.compact) {
+    output.write(
+      JSON.stringify({ ok: true, current, active, profiles: names }) + "\n"
+    );
+    return;
+  }
+
+  if (names.length === 0) {
+    output.write("还没有 profile。先跑 `ynapi setup` 创建第一个。\n");
+    return;
+  }
+  output.write(`配置文件   ${configPath()}\n\n`);
+  for (const n of names) {
+    let mark = "  ";
+    if (n === active) mark = "★ ";
+    else if (n === current) mark = "· ";
+    output.write(`${mark}${n}${n === current ? "  (默认)" : ""}${n === active && n !== current ? "  (本次)" : ""}\n`);
+  }
+  output.write(`\n切换默认：ynapi profile use <name>\n临时使用：ynapi --profile <name> <command>\n`);
+}
+
+async function runProfileUse(name) {
+  const opts = program.opts();
+  await useProfile(name);
+  if (opts.json || opts.compact) {
+    output.write(JSON.stringify({ ok: true, current: name }) + "\n");
+    return;
+  }
+  output.write(`✓ 默认 profile 已切到 "${name}"\n`);
+}
+
+async function runProfileRename(oldName, newName) {
+  const opts = program.opts();
+  await renameProfile(oldName, newName);
+  if (opts.json || opts.compact) {
+    output.write(JSON.stringify({ ok: true, renamed: { from: oldName, to: newName } }) + "\n");
+    return;
+  }
+  output.write(`✓ profile "${oldName}" → "${newName}"\n`);
+}
+
+async function runProfileRemove(name, cmdOpts) {
+  const opts = program.opts();
+  if (!cmdOpts.yes) {
+    const ok = await confirmYesNo(`确认删除 profile "${name}"？此操作不可恢复 [y/N]: `);
+    if (!ok) {
+      output.write("已取消\n");
+      return;
+    }
+  }
+  await removeProfile(name);
+  if (opts.json || opts.compact) {
+    output.write(JSON.stringify({ ok: true, removed: name }) + "\n");
+    return;
+  }
+  output.write(`✓ 已删除 profile "${name}"\n`);
 }

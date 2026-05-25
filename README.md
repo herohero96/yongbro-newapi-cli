@@ -39,7 +39,12 @@ ynapi balance      # 查余额
 | 命令 | 作用 |
 |---|---|
 | `ynapi setup` | 交互式写入 `~/.ynapi/config.json`（中转站 URL + API key） |
+| `ynapi setup --profile <name>` | 在指定 profile 下交互配置（多中转站时用） |
 | `ynapi setup --advanced` | 额外配置 cookie + user_id，解锁 `usage` / `tokens` / `logs` 命令 |
+| `ynapi profile list` | 列出所有 profile，标记当前默认 |
+| `ynapi profile use <name>` | 切换默认 profile |
+| `ynapi profile rename <old> <new>` | 重命名 profile |
+| `ynapi profile remove <name>` | 删除 profile（不能删当前默认） |
 | `ynapi snapshot` | **AI 友好**：一站式拉账号 + key + 健康检查；`--json` 输出稳定 schema |
 | `ynapi account` | 查账号总余额 / 累计花费 / 总请求数（"还剩多少钱"），需 cookie |
 | `ynapi balance` | 查当前 sk- 令牌的额度（cookie 在时也会显示账号行） |
@@ -59,6 +64,7 @@ ynapi balance      # 查余额
 
 | Flag | 作用 |
 |---|---|
+| `-p, --profile <name>` | 用指定 profile（不切默认；优先级最高） |
 | `--site <url>` | 中转站地址（覆盖配置文件） |
 | `--key <sk-...>` | API key（覆盖配置文件） |
 | `--json` / `--compact` | 纯 JSON 输出（适合管道给 jq） |
@@ -68,6 +74,7 @@ ynapi balance      # 查余额
 
 | 变量 | 作用 |
 |---|---|
+| `YNAPI_PROFILE` | 用哪个 profile（覆盖配置里的 current；优先级低于 `--profile` flag） |
 | `YNAPI_SITE` | 中转站 URL |
 | `YNAPI_KEY` | API key |
 | `YNAPI_COOKIE` | 浏览器 cookie（`usage` 命令用） |
@@ -169,6 +176,40 @@ ynapi token rm 1234 -y                           # 跳过确认
 
 ⚠️ **完整 sk- 密钥仅能在中转站后台复制** — NewAPI 服务端不通过 API 返回明文，CLI 只能拿到 mask 过的（`DNl9**********seer`）。新建后请到后台复制完整 key。
 
+## 多中转站（profile）
+
+如果你同时用多个 NewAPI 中转站，可以在同一份配置里维护多个 profile：
+
+```bash
+# 建第二个 profile
+ynapi setup --profile testapi
+
+# 列出所有 profile（★ 是当前默认）
+$ ynapi profile list
+
+★ default  (默认)
+  testapi
+  ltcraft
+
+# 切换默认（影响后续所有命令）
+ynapi profile use testapi
+
+# 临时用某个 profile（不切默认）
+ynapi --profile ltcraft balance
+ynapi -p ltcraft snapshot --json
+
+# 用环境变量也行
+YNAPI_PROFILE=testapi ynapi balance
+
+# 重命名 / 删除
+ynapi profile rename testapi prod
+ynapi profile remove ltcraft        # 默认 y/n 确认
+```
+
+**优先级**：`--profile` flag > `YNAPI_PROFILE` 环境变量 > 配置里的 current。
+
+**自动迁移**：从老版本（0.7.x 及以前）升上来时，单 profile 配置会自动迁移到新结构（包装成 `default` profile），数据不丢、原有命令继续工作。
+
 ## 配合 Claude Code / Cursor / Codex 使用
 
 `ynapi` 的设计目标之一就是给 AI 助手用 — 装上之后让 AI 主动帮你管账户。
@@ -243,12 +284,15 @@ JSON schema 字段是稳定契约（`remaining_usd` / `used_usd` 等命名将在
 
 ```json
 {
-  "site": "https://ai.ltcraft.cn",
-  "api_key": "sk-xxx"
+  "current": "default",
+  "profiles": {
+    "default": { "site": "https://ai.ltcraft.cn", "api_key": "sk-xxx" },
+    "testapi": { "site": "https://test.com", "api_key": "sk-yyy", "cookie": "...", "user_id": 100 }
+  }
 }
 ```
 
-文件权限会被设为 `0600`（仅当前用户可读写）。
+文件权限会被设为 `0600`（仅当前用户可读写）。从旧版升级时单 profile 结构会自动迁移。
 
 ## 鸣谢
 
