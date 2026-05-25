@@ -34,73 +34,140 @@ function fmtQuota(n) {
   if (typeof n !== "number") return String(n);
   return (n / QUOTA_PER_DOLLAR).toFixed(4);
 }
+function quotaToUsd(n) {
+  if (typeof n !== "number") return null;
+  return Number((n / QUOTA_PER_DOLLAR).toFixed(4));
+}
+
+const EXIT = {
+  OK: 0,
+  GENERIC: 1,
+  CONFIG_MISSING: 2,
+  KEY_INVALID: 3,
+  COOKIE_MISSING: 4,
+  COOKIE_EXPIRED: 5,
+  NETWORK: 6,
+  USAGE: 7,
+  NOT_FOUND: 8,
+};
+
+function classifyError(err) {
+  const msg = err?.message ?? "";
+  if (err instanceof ApiError) {
+    if (err.status === 401 || err.status === 403) {
+      if (msg.includes("API key")) return EXIT.KEY_INVALID;
+      if (msg.includes("Cookie")) return EXIT.COOKIE_EXPIRED;
+    }
+    if (msg.includes("网络错误") || msg.includes("超时")) return EXIT.NETWORK;
+  }
+  if (msg.includes("缺少 cookie") || msg.includes("缺少 user_id")) return EXIT.COOKIE_MISSING;
+  if (msg.includes("未配置 API key") || msg.includes("api_key")) return EXIT.KEY_INVALID;
+  if (msg.includes("找不到")) return EXIT.NOT_FOUND;
+  if (msg.includes("必须") || msg.includes("不能")) return EXIT.USAGE;
+  return EXIT.GENERIC;
+}
 
 const program = new Command();
 
 program
   .name("ynapi")
-  .description("从终端查 NewAPI 中转站的余额、用量、模型。")
+  .description(
+    `从终端查 NewAPI 中转站的余额、用量、模型 — 给开发者和 AI 助手用。
+
+何时用哪个命令（AI 速查）:
+  账号总余额 / 充值剩多少     → usage         （账号级，需 cookie）
+  当前 sk- 令牌的额度          → balance       （单令牌级，需 key）
+  账号是否可用 / 配置是否对    → status
+  花了多少钱（聚合 / 趋势）    → usage [--by-model | --days N]
+  每次调用花了多少（流水）    → logs --limit N --days N [--model X]
+  有哪些模型可用              → models [-q kw]
+  列出我账号下所有 sk- 令牌    → tokens         （只读复数）
+  新建 / 改 / 删 sk- 令牌      → token <子命令> （CRUD 单数）
+
+鉴权速查:
+  [需 key]    balance / models                  — API key（Bearer）
+  [需 cookie] usage / tokens / token / logs      — 浏览器 cookie + user_id
+  [无需鉴权]  setup / status / config show`
+  )
   .version(pkg.version, "-v, --version", "打印版本号")
   .option("--site <url>", "中转站地址（覆盖配置）")
   .option("--key <sk-...>", "API key（覆盖配置）")
-  .option("--json", "纯 JSON 输出（适合管道给 jq）")
+  .option("--json", "纯 JSON 输出（适合管道给 jq / AI 处理）")
   .option("--compact", "--json 的别名（与 job-pro 风格一致）");
 
 program
   .command("setup")
-  .description("交互式写入配置（中转站 URL + API key）")
-  .option("--advanced", "高级模式：额外配置 cookie + user_id（用于 usage 命令）")
+  .description("[初始化] 交互式写入配置（中转站 URL + API key）")
+  .option("--advanced", "高级模式：额外配置 cookie + user_id（解锁 usage / tokens / token / logs）")
   .action(runSetup);
 
 program
   .command("balance")
-  .description("查询当前 key 的余额与用量")
+  .description("[需 key] 查当前 sk- 令牌的额度（不是账号总余额，账号余额用 `usage`）")
   .action(runBalance);
 
 program
+  .command("account")
+  .description(
+    "[需 cookie] 查账号总余额 / 累计花费 / 总请求数（用户问\"账号还剩多少钱\"就跑这个）"
+  )
+  .action(runAccount);
+
+program
+  .command("snapshot")
+  .description(
+    "[AI 友好] 一站式拉账号余额 + 当前 key + 健康检查；--json 输出稳定 schema，AI 解析最方便"
+  )
+  .action(runSnapshot);
+
+program
   .command("models")
-  .description("列出中转站可用的模型")
+  .description("[需 key] 列出中转站可用的模型（OpenAI 兼容的 /v1/models）")
   .option("-q, --query <kw>", "按模型名筛选（区分大小写）")
   .action(runModels);
 
 program
   .command("usage")
-  .description("按天查看用量明细（需要 cookie 鉴权，先跑 `ynapi setup --advanced`）")
+  .description(
+    "[需 cookie] 查账号总余额 + 按天/按模型的用量聚合（这是查\"账号还剩多少钱\"的命令）"
+  )
   .option("-d, --days <n>", "查询最近 N 天（默认 7）", "7")
   .option("-m, --by-model", "按模型分组（替代默认的按天分组）")
   .action(runUsage);
 
 program
   .command("tokens")
-  .description("列出账号下的所有令牌（需要 cookie 鉴权）")
+  .description("[需 cookie] 列出账号下的所有 sk- 令牌（只读；要增删改用 `token` 单数）")
   .option("-a, --all", "也显示已禁用 / 已过期 / 已耗尽的令牌")
   .action(runTokens);
 
 program
   .command("logs")
-  .description("查看每次具体调用的流水明细（需要 cookie 鉴权）")
+  .description(
+    "[需 cookie] 查每次具体调用的流水明细（usage 是日聚合 / logs 是单次流水，用于排查异常）"
+  )
   .option("-n, --limit <n>", "显示最近 N 条（默认 50）", "50")
   .option("-d, --days <n>", "只看最近 N 天（默认 7）", "7")
-  .option("-m, --model <name>", "按模型名过滤（前缀匹配）")
-  .option("-t, --token <name>", "按 token 名过滤")
+  .option("-m, --model <name>", "按模型名过滤（前缀匹配，服务端过滤）")
+  .option("-t, --token <name>", "按 token 名过滤（服务端过滤）")
   .action(runLogs);
 
 const configCmd = program
   .command("config")
-  .description("查看或管理本地配置文件");
+  .description("[本地] 查看或管理本地配置文件（不发请求）");
 
 configCmd
   .command("show")
-  .description("打印当前生效的配置（API key / cookie 自动 mask）")
+  .description("打印当前生效的配置，自动 mask key / cookie，并标注每个值来自 flag/env/file")
   .action(runConfigShow);
 
 const tokenCmd = program
   .command("token")
-  .description("管理账号下的令牌（增删改）— 需要 cookie 鉴权");
+  .description("[需 cookie] 管理账号下的 sk- 令牌（增删改）— 单数子命令组，复数 `tokens` 是只读");
 
 tokenCmd
   .command("create <name>")
-  .description("创建一个新令牌")
+  .description("新建一个 sk- 令牌（注意：sk- 完整明文只能在中转站后台复制，API 不返回）")
   .option("-q, --quota <n>", "额度（NewAPI 内部 quota 单位，1美元≈500000）", "0")
   .option("-u, --unlimited", "无限额度")
   .option("-e, --expires <date>", "过期时间（ISO 日期 yyyy-mm-dd 或 unix 秒；默认永不过期）")
@@ -111,7 +178,7 @@ tokenCmd
 
 tokenCmd
   .command("update <idOrName>")
-  .description("修改令牌（按 id 或 name 定位）")
+  .description("修改令牌字段（按 id 数字或 name 字符串定位；--status 必须单独使用）")
   .option("--name <new>", "改名字")
   .option("-q, --quota <n>", "改额度")
   .option("-u, --unlimited", "改成无限额度")
@@ -120,30 +187,32 @@ tokenCmd
   .option("-g, --group <name>", "改分组")
   .option("--allow-ips <list>", "改 IP 白名单")
   .option("--model-limits <list>", "改可调用模型限制")
-  .option("--status <n>", "改状态（1=正常 2=禁用 3=过期 4=耗尽）")
+  .option("--status <n>", "改状态（1=正常 2=禁用 3=过期 4=耗尽，必须单独用）")
   .action(runTokenUpdate);
 
 tokenCmd
   .command("delete <idOrName>")
   .alias("rm")
-  .description("删除令牌（默认会让你确认一次）")
+  .description("删除令牌（默认 y/N 确认，AI / 脚本可加 -y 跳过）")
   .option("-y, --yes", "跳过确认直接删")
   .action(runTokenDelete);
 
 tokenCmd
   .command("enable <idOrName>")
-  .description("启用令牌（设 status=1，等同 update --status 1）")
+  .description("启用令牌（status=1；等同 `update --status 1`，但更直观）")
   .action((idOrName) => runTokenSetStatus(idOrName, 1));
 
 tokenCmd
   .command("disable <idOrName>")
-  .description("禁用令牌（设 status=2，等同 update --status 2）")
+  .description("禁用令牌（status=2；等同 `update --status 2`，但更直观）")
   .action((idOrName) => runTokenSetStatus(idOrName, 2));
 
 program
   .command("status")
   .alias("doctor")
-  .description("健康检查：配置、API key、cookie 是否都正常")
+  .description(
+    "[无需鉴权] 健康检查：config / api-key / cookie 三项；失败时退出码 1（脚本/AI 可检测）"
+  )
   .action(runStatus);
 
 program.addHelpText(
@@ -151,39 +220,47 @@ program.addHelpText(
   `
 示例:
   $ ynapi setup                                  # 首次配置
-  $ ynapi setup --advanced                       # 额外配置 cookie（解锁 usage）
-  $ ynapi balance                                # 查余额
-  $ ynapi balance --json | jq                    # 管道用
-  $ ynapi tokens --compact                       # 同 --json，与 job-pro 一致
-  $ ynapi models                                 # 列所有模型
-  $ ynapi models -q claude                       # 只看含 claude 的
-  $ ynapi usage                                  # 最近 7 天用量（按天）
-  $ ynapi usage --days 30                        # 最近 30 天
-  $ ynapi usage --by-model                       # 按模型分组而不是按天
-  $ ynapi tokens                                 # 列出所有令牌
-  $ ynapi tokens -a                              # 包含禁用/过期/耗尽的
+  $ ynapi setup --advanced                       # 额外配置 cookie（解锁 usage / token 等）
+  $ ynapi snapshot --json                        # ★ AI 一站式入口：账号 + key + 健康一次拉
+  $ ynapi account                                # 账号总余额（"还剩多少钱"）
+  $ ynapi balance                                # 当前 sk- 令牌的额度
+  $ ynapi usage --days 30                        # 最近 30 天用量
+  $ ynapi usage --by-model                       # 按模型聚合
+  $ ynapi logs --limit 200 --days 1              # 今天最近 200 条调用流水
+  $ ynapi logs --model claude --json | jq        # 服务端过滤 + 管道
+  $ ynapi tokens                                 # 列所有 sk- 令牌（只读）
   $ ynapi token create "测试令牌" -q 500000      # 新建（quota = 1美元）
-  $ ynapi token create "无限token" --unlimited
-  $ ynapi token update 1234 -q 1000000           # 改额度（按 id 定位）
-  $ ynapi token update "测试令牌" --name "新名字"  # 改名（按 name 定位）
-  $ ynapi token disable "测试令牌"                # 禁用
-  $ ynapi token enable "测试令牌"                 # 启用
-  $ ynapi token delete 1234                      # 删（会要求 y/n 确认）
+  $ ynapi token disable "测试令牌"                # 禁用 / enable 启用
   $ ynapi token rm 1234 -y                       # 删，跳过确认
-  $ ynapi logs                                   # 最近 50 条调用流水
-  $ ynapi logs --limit 200 --days 1              # 今天的最近 200 条
-  $ ynapi logs --model claude                    # 只看 claude-* 调用
-  $ ynapi logs --token main --json | jq          # 按令牌过滤 + 管道
-  $ ynapi config show                            # 看当前生效的配置（自动 mask）
+  $ ynapi config show                            # 看当前配置（自动 mask）
   $ ynapi status                                 # 健康检查（配置/key/cookie）
-  $ ynapi doctor --json                          # 同上，机器可读输出
   $ ynapi --site https://other.com --key sk-xxx balance
 
 环境变量:
   YNAPI_SITE       中转站 URL（覆盖配置文件）
   YNAPI_KEY        API key（覆盖配置文件）
-  YNAPI_COOKIE     浏览器 cookie（usage 命令用）
-  YNAPI_USER_ID    new-api-user 头（usage 命令用）
+  YNAPI_COOKIE     浏览器 cookie（cookie-class 命令用）
+  YNAPI_USER_ID    new-api-user 头（cookie-class 命令用）
+
+退出码（AI / 脚本可据此判断下一步）:
+  0  成功
+  1  通用错误
+  2  配置文件不存在     → 跑 \`ynapi setup\`
+  3  API key 无效        → 跑 \`ynapi setup\` 或更换 --key
+  4  cookie 缺失         → 跑 \`ynapi setup --advanced\`
+  5  cookie 过期         → 跑 \`ynapi setup --advanced\` 重粘 cookie
+  6  网络错误            → 检查 --site 或网络
+  7  参数错误（用法）
+  8  目标资源不存在（如令牌名找不到）
+
+For AI assistants:
+  - 用户问"账号余额 / 还剩多少 / 这个月花了多少" → \`account\` 或 \`usage\`
+  - 用户问"当前 key 还能用多少"                  → \`balance\`
+  - 用户问"今天调用情况 / 哪次最贵"              → \`logs --limit N --days N\`
+  - 用户问"健康 / 能用吗 / 出了什么错"           → \`status\`
+  - 不确定要哪个？先跑 \`snapshot --json\`，里面什么都有
+  - 任何命令都支持 \`--json\` / \`--compact\`，schema 稳定
+  - 失败时看 stderr JSON 的 \`exit_code\` 字段，按上面的码决定下一步动作
 
 配置文件:
   ${configPath()}
@@ -191,8 +268,16 @@ program.addHelpText(
 );
 
 program.parseAsync(process.argv).catch((err) => {
-  process.stderr.write(`✗ ${err.message}\n`);
-  process.exit(1);
+  const opts = program.opts();
+  const code = classifyError(err);
+  if (opts.json || opts.compact) {
+    process.stderr.write(
+      JSON.stringify({ ok: false, error: err.message, exit_code: code }) + "\n"
+    );
+  } else {
+    process.stderr.write(`✗ ${err.message}\n`);
+  }
+  process.exit(code);
 });
 
 async function runSetup(cmdOpts) {
@@ -253,23 +338,71 @@ async function runBalance() {
     throw new Error("未配置 API key。先跑 `ynapi setup`，或用 --key / YNAPI_KEY 提供。");
   }
 
-  const json = await getTokenUsage(site, key);
-  const data = json?.data ?? {};
+  const { cookie, userId } = resolveAuth({ siteFlag: opts.site, config: cfg });
+  const cookieAvailable = !!(cookie && userId);
+
+  const tokenJson = await getTokenUsage(site, key);
+  const data = tokenJson?.data ?? {};
+
+  let accountData = null;
+  let accountError = null;
+  if (cookieAvailable) {
+    try {
+      const userJson = await getUserSelf(site, { cookie, userId });
+      accountData = userJson?.data ?? null;
+    } catch (err) {
+      accountError = err.message;
+    }
+  }
+
+  const stableKey = {
+    name: data.name ?? null,
+    unlimited: !!data.unlimited_quota,
+    used_usd: quotaToUsd(data.total_used),
+    granted_usd: quotaToUsd(data.total_granted),
+    remaining_usd: data.unlimited_quota ? "infinite" : quotaToUsd(data.total_available),
+    expires_at: data.expires_at && data.expires_at !== 0 ? data.expires_at : null,
+  };
+  const stableAccount = accountData
+    ? {
+        username: accountData.username ?? null,
+        id: accountData.id ?? null,
+        remaining_usd: quotaToUsd(accountData.quota),
+        used_usd: quotaToUsd(accountData.used_quota),
+        requests: accountData.request_count ?? null,
+      }
+    : null;
 
   if (opts.json || opts.compact) {
-    output.write(JSON.stringify(json) + "\n");
+    output.write(
+      JSON.stringify({
+        ok: true,
+        site,
+        key: stableKey,
+        account: stableAccount,
+        account_error: accountError,
+        raw: tokenJson,
+      }) + "\n"
+    );
     return;
   }
 
   const lines = [];
   lines.push(`中转站   ${site}`);
+  if (stableAccount) {
+    lines.push(`账号余额 ${stableAccount.remaining_usd} 美元等值（剩余）— 累计用 ${stableAccount.used_usd}`);
+  } else if (cookieAvailable && accountError) {
+    lines.push(`账号余额 (查询失败：${accountError})`);
+  } else {
+    lines.push(`账号余额 (未配置 cookie，跑 \`ynapi setup --advanced\` 解锁)`);
+  }
   lines.push(`Key 名   ${data.name ?? "(未命名)"}`);
   if (data.unlimited_quota) {
-    lines.push(`额度     ∞ 无限额度（已用 ${fmtQuota(data.total_used)} 美元等值）`);
+    lines.push(`Key 额度 ∞ 无限额度（已用 ${fmtQuota(data.total_used)} 美元等值）`);
   } else {
-    lines.push(`总额度   ${fmtQuota(data.total_granted)} 美元等值`);
-    lines.push(`已用     ${fmtQuota(data.total_used)} 美元等值`);
-    lines.push(`剩余     ${fmtQuota(data.total_available)} 美元等值`);
+    lines.push(`Key 总额 ${fmtQuota(data.total_granted)} 美元等值`);
+    lines.push(`Key 已用 ${fmtQuota(data.total_used)} 美元等值`);
+    lines.push(`Key 剩余 ${fmtQuota(data.total_available)} 美元等值`);
   }
   if (data.expires_at && data.expires_at !== 0) {
     lines.push(`过期     ${new Date(data.expires_at * 1000).toLocaleString()}`);
@@ -277,6 +410,140 @@ async function runBalance() {
     lines.push(`过期     永不过期`);
   }
   output.write(lines.join("\n") + "\n");
+}
+
+async function runAccount() {
+  const opts = program.opts();
+  const cfg = await readConfig();
+  const { site, cookie, userId } = resolveAuth({ siteFlag: opts.site, config: cfg });
+
+  const userJson = await getUserSelf(site, { cookie, userId });
+  const u = userJson?.data ?? {};
+
+  const stable = {
+    site,
+    username: u.username ?? null,
+    id: u.id ?? null,
+    remaining_usd: quotaToUsd(u.quota),
+    used_usd: quotaToUsd(u.used_quota),
+    requests: u.request_count ?? null,
+    group: u.group ?? null,
+  };
+
+  if (opts.json || opts.compact) {
+    output.write(JSON.stringify({ ok: true, account: stable, raw: u }) + "\n");
+    return;
+  }
+
+  output.write(`中转站     ${site}\n`);
+  output.write(`用户       ${stable.username ?? "(未知)"} (id=${stable.id ?? "?"})\n`);
+  output.write(`账号剩余   ${stable.remaining_usd} 美元等值\n`);
+  output.write(`累计已用   ${stable.used_usd} 美元等值\n`);
+  output.write(`总请求数   ${stable.requests ?? 0}\n`);
+  if (stable.group) output.write(`分组       ${stable.group}\n`);
+}
+
+async function runSnapshot() {
+  const opts = program.opts();
+  const cfg = await readConfig();
+  const { site, key } = resolveCreds({
+    siteFlag: opts.site,
+    keyFlag: opts.key,
+    config: cfg,
+  });
+  const { cookie, userId } = resolveAuth({ siteFlag: opts.site, config: cfg });
+
+  const result = {
+    ok: true,
+    site,
+    config: { path: configPath(), exists: !!cfg },
+    key: null,
+    account: null,
+    health: { config: cfg ? "ok" : "missing", api_key: null, cookie: null },
+    errors: {},
+  };
+
+  // key 状态
+  if (key) {
+    try {
+      const tokenJson = await getTokenUsage(site, key);
+      const d = tokenJson?.data ?? {};
+      result.key = {
+        masked: maskKey(key),
+        name: d.name ?? null,
+        unlimited: !!d.unlimited_quota,
+        used_usd: quotaToUsd(d.total_used),
+        granted_usd: quotaToUsd(d.total_granted),
+        remaining_usd: d.unlimited_quota ? "infinite" : quotaToUsd(d.total_available),
+        expires_at: d.expires_at && d.expires_at !== 0 ? d.expires_at : null,
+      };
+      result.health.api_key = "ok";
+    } catch (err) {
+      result.health.api_key = "fail";
+      result.errors.api_key = err.message;
+    }
+  } else {
+    result.health.api_key = "missing";
+    result.errors.api_key = "未配置 API key";
+  }
+
+  // 账号 + cookie 状态
+  if (cookie && userId) {
+    try {
+      const userJson = await getUserSelf(site, { cookie, userId });
+      const u = userJson?.data ?? {};
+      result.account = {
+        username: u.username ?? null,
+        id: u.id ?? null,
+        remaining_usd: quotaToUsd(u.quota),
+        used_usd: quotaToUsd(u.used_quota),
+        requests: u.request_count ?? null,
+        group: u.group ?? null,
+      };
+      result.health.cookie = "ok";
+    } catch (err) {
+      result.health.cookie = "fail";
+      result.errors.cookie = err.message;
+    }
+  } else {
+    result.health.cookie = "missing";
+    result.errors.cookie = "未配置 cookie / user_id";
+  }
+
+  // 整体 ok
+  result.ok = result.health.api_key === "ok" || result.health.cookie === "ok";
+
+  if (opts.json || opts.compact) {
+    output.write(JSON.stringify(result) + "\n");
+    return;
+  }
+
+  output.write(`ynapi snapshot @ ${site}\n\n`);
+
+  output.write(`账号\n`);
+  if (result.account) {
+    output.write(`  用户         ${result.account.username} (id=${result.account.id})\n`);
+    output.write(`  剩余         ${result.account.remaining_usd} 美元等值\n`);
+    output.write(`  累计已用     ${result.account.used_usd}\n`);
+    output.write(`  总请求       ${result.account.requests}\n`);
+  } else {
+    output.write(`  ✗ ${result.errors.cookie}\n`);
+  }
+
+  output.write(`\n当前 Key\n`);
+  if (result.key) {
+    output.write(`  名称         ${result.key.name}\n`);
+    output.write(`  剩余         ${result.key.remaining_usd}\n`);
+    output.write(`  已用         ${result.key.used_usd}\n`);
+  } else {
+    output.write(`  ✗ ${result.errors.api_key}\n`);
+  }
+
+  output.write(`\n健康\n`);
+  for (const [k, v] of Object.entries(result.health)) {
+    const mark = v === "ok" ? "✓" : v === "missing" ? "○" : "✗";
+    output.write(`  ${mark}  ${k.padEnd(10)} ${v}\n`);
+  }
 }async function runModels(cmdOpts) {
   const opts = program.opts();
   const cfg = await readConfig();

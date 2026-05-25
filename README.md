@@ -40,7 +40,9 @@ ynapi balance      # 查余额
 |---|---|
 | `ynapi setup` | 交互式写入 `~/.ynapi/config.json`（中转站 URL + API key） |
 | `ynapi setup --advanced` | 额外配置 cookie + user_id，解锁 `usage` / `tokens` / `logs` 命令 |
-| `ynapi balance` | 查询当前 key 的余额与用量 |
+| `ynapi snapshot` | **AI 友好**：一站式拉账号 + key + 健康检查；`--json` 输出稳定 schema |
+| `ynapi account` | 查账号总余额 / 累计花费 / 总请求数（"还剩多少钱"），需 cookie |
+| `ynapi balance` | 查当前 sk- 令牌的额度（cookie 在时也会显示账号行） |
 | `ynapi models [-q kw]` | 列出中转站可用的模型，`-q` 关键字过滤 |
 | `ynapi usage [--days N] [--by-model]` | 按天（或按模型）查看用量明细，需 cookie |
 | `ynapi tokens [-a]` | 列出账号下的所有令牌，`-a` 包含禁用/过期/耗尽的，需 cookie |
@@ -169,15 +171,71 @@ ynapi token rm 1234 -y                           # 跳过确认
 
 ## 配合 Claude Code / Cursor / Codex 使用
 
-把下面这段提示词复制到 Claude Code、Cursor 或 Codex 的对话框：
+`ynapi` 的设计目标之一就是给 AI 助手用 — 装上之后让 AI 主动帮你管账户。
+
+### 推荐 prompt 模板
+
+把下面这段粘到 Claude Code / Cursor / Codex 的系统 prompt（或 CLAUDE.md / .cursorrules）：
 
 ```
-Run `npx @herohero96/newapi-cli@latest --help` to discover the CLI, then use it
-to check my NewAPI relay balance, usage, and available models.
+This project uses NewAPI relay via @herohero96/newapi-cli. To check the user's
+account state, use these commands (always pass --json for stable parsing):
+
+  - "余额 / 还剩多少钱"     → `npx @herohero96/newapi-cli@latest snapshot --json`
+  - "今天花了多少 / 流水"    → `... logs --limit 50 --days 1 --json`
+  - "用量趋势 / 这周花费"    → `... usage --days 7 --json`
+  - "出错了 / 能用吗"        → `... status --json`
+  - 不确定要哪个？先 snapshot，里面什么都有
+
+Exit codes signal what to do next:
+  0=ok, 2=run setup, 3=key invalid, 4=run setup --advanced, 5=cookie expired,
+  6=network, 7=usage error, 8=resource not found
+
 Always reply in Chinese.
 ```
 
-之后就可以直接对 AI 说"看一下我的余额"或"列一下能用的 claude 模型"——AI 会自己跑 CLI 查询。
+### 一站式入口：`snapshot`
+
+```bash
+$ ynapi snapshot --json | jq
+{
+  "ok": true,
+  "site": "https://ai.ltcraft.cn",
+  "key": {
+    "name": "pc电脑",
+    "remaining_usd": "infinite",
+    "used_usd": 1753.7247,
+    "unlimited": true
+  },
+  "account": {
+    "username": "you@example.com",
+    "id": 446,
+    "remaining_usd": 794.6847,
+    "used_usd": 18504.93,
+    "requests": 78088
+  },
+  "health": { "config": "ok", "api_key": "ok", "cookie": "ok" }
+}
+```
+
+JSON schema 字段是稳定契约（`remaining_usd` / `used_usd` 等命名将在所有命令保持一致），AI 直接读字段就行，不用解析表格。
+
+### 退出码
+
+所有命令失败时按下面的码退出，AI 可以据此判断下一步：
+
+| 码 | 含义 | AI 该做什么 |
+|---|---|---|
+| 0 | 成功 | — |
+| 2 | 配置文件不存在 | 让用户跑 `ynapi setup` |
+| 3 | API key 无效 | 让用户跑 `ynapi setup` 或换 `--key` |
+| 4 | cookie 缺失 | 让用户跑 `ynapi setup --advanced` |
+| 5 | cookie 过期 | 让用户重粘 cookie（同上） |
+| 6 | 网络错误 | 检查 `--site` / 网络 |
+| 7 | 参数用法错误 | 看 stderr 提示修正 |
+| 8 | 目标资源不存在 | 比如令牌名找错 |
+
+`--json` 模式下，错误也会打印到 stderr 的 JSON：`{"ok":false,"error":"...","exit_code":3}`。
 
 ## 配置文件
 
